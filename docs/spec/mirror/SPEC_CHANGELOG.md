@@ -87,3 +87,6 @@ STATUS: M12\_INDEXED / READY-BUT-MILESTONE-BLOCKED / RUNTIME\_GATE\_STILL\_M11
 2026-09-26 — NAV-M11-ROW-SHAPE-REPAIR-001 — repaired M11 registry row shape  
 REQ-VISUALIZATION-020..025 and REQ-ACCEPTANCE-015 had acceptance criteria shifted into the MILESTONE column with ACCEPTANCE empty. REQUIREMENTS\_REGISTRY now restores MILESTONE=M11 and the original acceptance criteria in ACCEPTANCE. Requirement IDs, semantics, status, priority, dependency order and backlog mapping are unchanged. MACHINE PR \#759 captured the malformed pre-repair rows and is not valid mirror-verification evidence; await a fresh MACHINE sync from corrected Drive truth. No manual mirror edit and no allowlist change.  
 STATUS: REPAIRED\_IN\_DRIVE / MACHINE\_RESYNC\_PENDING  
+2026-09-28 — HANDOFF-REPAIR-M4-006 — REQ-PRODUCTION-005, REQ-PRODUCTION-008 — Phase-4 carried OUTPUT timing  
+Clarified that OUTPUT physically present before Phase 4 may supply PRE\_PRODUCTION INPUT demand. Same-tick Phase-5 output cannot; ACTIVE uses the Section-17 reserve, CLOSING uses zero reserve, and Phase 5 recomputes MAIN from remaining stock so Phase-4 quantity is not offered twice. Updated canonical \+ Handoff Markets/Production; no new market path, phase, default, or M5+ behavior.
+

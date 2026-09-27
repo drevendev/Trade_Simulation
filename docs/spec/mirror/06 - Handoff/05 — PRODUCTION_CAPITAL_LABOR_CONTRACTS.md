@@ -397,7 +397,8 @@ minimumReserveQuantity \= targetOutputReserve
 sourcePlanId \= ProductionPlan.planId  
 inventoryBucket \= OUTPUT
 
-All local sales, exports, taxes, FX and shipment ownership use MARKETS\_TRADE\_FX\_CONTRACTS unchanged. The Production subsystem never credits sale revenue itself.
+All local sales, exports, taxes, FX and shipment ownership use MARKETS\_TRADE\_FX\_CONTRACTS unchanged. The Production subsystem never credits sale revenue itself.  
+Phase-4 carried OUTPUT is PRE\_PRODUCTION-only; Phase 5 recomputes the later MAIN offer from the stock that remains.
 
 18\. Production telemetry and realized operating result
 
