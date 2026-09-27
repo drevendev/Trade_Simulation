@@ -103,6 +103,32 @@ describe("REQ-CORE-005 Phase-1 jurisdiction activation", () => {
     expect(applyJurisdictionTransitionsAtPhase1(world, 9)).toBe(world);
   });
 
+  it("fails closed instead of silently preserving an overdue jurisdiction change", () => {
+    const opening = baselineWorld();
+    const region = [...opening.regions.values()][0]!;
+    const target = distinctTarget(opening, region.regionId);
+    const world: WorldState = {
+      ...opening,
+      pendingTransitions: {
+        ...opening.pendingTransitions,
+        jurisdictionChanges: [
+          { regionId: region.regionId, nextControllerStateId: target, activateTick: 4 },
+        ],
+      },
+    };
+
+    expect(() => resolveEffectiveJurisdictionAtPhase1(world, 5)).toThrow(
+      /Stale Phase-1 jurisdiction change/,
+    );
+    expect(() => applyJurisdictionTransitionsAtPhase1(world, 5)).toThrow(
+      /Stale Phase-1 jurisdiction change/,
+    );
+    expect(world.regions.get(region.regionId)!.controllerStateId).toBe(
+      region.controllerStateId,
+    );
+    expect(world.pendingTransitions.jurisdictionChanges).toHaveLength(1);
+  });
+
   it("supports explicit null authority at the activation boundary", () => {
     const opening = baselineWorld();
     const region = [...opening.regions.values()][0]!;
