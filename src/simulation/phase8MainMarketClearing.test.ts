@@ -56,15 +56,11 @@ const fixtureTaxPolicy: TaxPolicyProvider = {
 };
 
 /**
- * Seller-net price this fixture clears at.
- *
- * Phase 8 reads the price from `context.marketPrices` (Phase 6 this tick), else from
- * `world.markets`, else 10. These tests run Phase 8 alone and point the region at a market
- * ID the baseline world does not carry, so the price is exactly 10 with no Phase-6 handler
- * to configure -- the clean seller-net number the acceptance criterion states.
+ * Seller-net price this fixture clears at. The baseline Region's live LocalMarket carries
+ * food at 10, so direct Phase-8 fixtures exercise the canonical carried-price path without
+ * inventing a market or numeric runtime default.
  */
 const SELLER_NET_PRICE = 10;
-const UNSEEDED_MARKET = "mk:issue-481-tax-policy" as MarketId;
 
 interface Counterparties {
   readonly regionId: RegionId;
@@ -140,6 +136,20 @@ function buildWorld(): WorldState {
   return buildInitialWorld(baselineScenario, baselineDefinitionPack, createDefaultSimulationConfig(), 42);
 }
 
+function liveMarketId(world: WorldState, regionId: RegionId): MarketId {
+  const region = world.regions.get(regionId);
+  if (region === undefined) {
+    throw new Error(`missing test Region ${regionId}`);
+  }
+  const matches = Array.from(world.markets.values()).filter(
+    (market) => market.seed.regionKey === region.seed.key,
+  );
+  if (matches.length !== 1) {
+    throw new Error(`expected exactly one live LocalMarket for ${regionId}, found ${matches.length}`);
+  }
+  return matches[0]!.marketId;
+}
+
 describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", () => {
   it("prices the buyer's gross at sellerNet x (1 + rate x collectionEfficiency), not (1 + rate)", () => {
     const world = buildWorld();
@@ -155,7 +165,7 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
       world.pendingTransitions,
       createPhase8Handler({
         getFixtureIntents: () => buildIntents(actors, 1, 10.9),
-        getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+        getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
         collectTelemetry: true,
         taxPolicy: fixtureTaxPolicy,
       }),
@@ -199,7 +209,7 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
       world.pendingTransitions,
       createPhase8Handler({
         getFixtureIntents: () => buildIntents(actors, 1, 10.9),
-        getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+        getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
         collectTelemetry: false,
         taxPolicy: fixtureTaxPolicy,
       }),
@@ -251,7 +261,7 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
       uncontrolledWorld.pendingTransitions,
       createPhase8Handler({
         getFixtureIntents: () => buildIntents(actors, 1, 10.9),
-        getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+        getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
         collectTelemetry: true,
         taxPolicy: fixtureTaxPolicy,
       }),
@@ -327,7 +337,7 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
         world.pendingTransitions,
         createPhase8Handler({
           getFixtureIntents: () => orderedIntents,
-          getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+          getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
           collectTelemetry: true,
           taxPolicy: fixtureTaxPolicy,
         }),
@@ -348,6 +358,96 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
     );
   });
 
+  it("rejects an intent whose Region is absent instead of inventing a market", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const missingRegion = "region:missing-phase8" as RegionId;
+    const malformed = buildIntents(actors, 1, 10.9).map((intent) => ({
+      ...intent,
+      regionId: missingRegion,
+    }));
+
+    const handler = createPhase8Handler({
+      getFixtureIntents: () => malformed,
+      collectTelemetry: false,
+      taxPolicy: fixtureTaxPolicy,
+    });
+
+    expect(() => executeTick(world, 1, world.pendingTransitions, handler)).toThrow(
+      /references missing Region/,
+    );
+  });
+
+  it("rejects a fixture mapping to a live LocalMarket owned by another Region", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const region = world.regions.get(actors.regionId)!;
+    const wrongMarket = Array.from(world.markets.values()).find(
+      (market) => market.seed.regionKey !== region.seed.key,
+    )!.marketId;
+
+    const handler = createPhase8Handler({
+      getFixtureIntents: () => buildIntents(actors, 1, 10.9),
+      getFixtureMarketIds: () => new Map([[actors.regionId, wrongMarket]]),
+      collectTelemetry: false,
+      taxPolicy: fixtureTaxPolicy,
+    });
+
+    expect(() => executeTick(world, 1, world.pendingTransitions, handler)).toThrow(
+      /does not belong to Region/,
+    );
+  });
+
+  it("rejects missing canonical price evidence instead of using a numeric fallback", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const marketId = liveMarketId(world, actors.regionId);
+    const market = world.markets.get(marketId)!;
+    const prices = new Map(market.priceByGood);
+    prices.delete(FOOD);
+    const malformedWorld: WorldState = {
+      ...world,
+      markets: new Map(world.markets).set(marketId, { ...market, priceByGood: prices }),
+    };
+
+    const handler = createPhase8Handler({
+      getFixtureIntents: () => buildIntents(actors, 1, 10.9),
+      getFixtureMarketIds: () => new Map([[actors.regionId, marketId]]),
+      collectTelemetry: false,
+      taxPolicy: fixtureTaxPolicy,
+    });
+
+    expect(() =>
+      executeTick(malformedWorld, 1, malformedWorld.pendingTransitions, handler),
+    ).toThrow(/requires a finite positive canonical price/);
+  });
+
+  it("rejects a Region whose settlement currency is absent from WorldState", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const region = world.regions.get(actors.regionId)!;
+    const missingCurrency = "cur:missing-phase8" as CurrencyId;
+    const malformedWorld: WorldState = {
+      ...world,
+      regions: new Map(world.regions).set(actors.regionId, {
+        ...region,
+        settlementCurrencyId: missingCurrency,
+      }),
+    };
+
+    const handler = createPhase8Handler({
+      getFixtureIntents: () => buildIntents(actors, 1, 10.9),
+      getFixtureMarketIds: () =>
+        new Map([[actors.regionId, liveMarketId(malformedWorld, actors.regionId)]]),
+      collectTelemetry: false,
+      taxPolicy: fixtureTaxPolicy,
+    });
+
+    expect(() =>
+      executeTick(malformedWorld, 1, malformedWorld.pendingTransitions, handler),
+    ).toThrow(/settlement currency .* is missing from WorldState/);
+  });
+
   it("refuses to clear a fixture that supplies no tax policy", () => {
     // No fallback rate exists to fall back to: an M3 fixture that does not state its tax
     // policy is a defect, not a request for a canonical default.
@@ -365,7 +465,7 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
 
     const handler = createPhase8Handler({
       getFixtureIntents: () => buildIntents(actors, 1, 10.9),
-      getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+      getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
       collectTelemetry: false,
       taxPolicy: { getConsumptionTaxRate: () => 0.2, getCollectionEfficiency: () => 1.4 },
     });

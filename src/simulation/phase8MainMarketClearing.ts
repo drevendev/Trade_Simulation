@@ -13,7 +13,7 @@
  * runs produce identical canonical stocks, allocations, and replay hash.
  */
 
-import type { MarketId, GoodId, RegionId, CurrencyId, StateId } from "../domain/id";
+import type { MarketId, GoodId, RegionId, StateId } from "../domain/id";
 import { stableOrderBy } from "../domain/ordering";
 import type { WorldState } from "./worldState";
 import type { TickContext, PhaseHandler } from "./tickOrchestrator";
@@ -131,10 +131,12 @@ export const createPhase8Handler = (options?: {
     }
 
     const intents = getFixtureIntents(world, context);
-    const marketIds = getFixtureMarketIds?.(world) ?? new Map();
+    const fixtureMarketIds = getFixtureMarketIds?.(world);
     const quantityEpsilon = world.simulationConfig.numeric.quantityEpsilon ?? 1e-9;
 
-    // Group intents by market/good/pass
+    // Group intents by canonical live Region/LocalMarket/good/pass identity. A fixture may
+    // name the intended live market explicitly, but it may not invent one: Handoff/04
+    // binds local clearing to the LocalMarket owned by the intent Region.
     const intentsByMarketGoodPass = new Map<string, {
       buyers: MarketIntent[];
       sellers: MarketIntent[];
@@ -144,8 +146,42 @@ export const createPhase8Handler = (options?: {
     }>();
 
     for (const intent of intents) {
-      const marketId = marketIds.get(intent.regionId) || ("market:1" as MarketId);
-      const key = `${marketId}|${intent.goodId}|MAIN`;
+      const region = world.regions.get(intent.regionId as RegionId);
+      if (region === undefined) {
+        throw new Error(`Phase-8 intent ${intent.id} references missing Region ${intent.regionId}`);
+      }
+
+      const fixtureMarketId = fixtureMarketIds?.get(intent.regionId);
+      let marketId: MarketId;
+      if (fixtureMarketId !== undefined) {
+        const fixtureMarket = world.markets.get(fixtureMarketId);
+        if (fixtureMarket === undefined) {
+          throw new Error(
+            `Phase-8 fixture maps Region ${intent.regionId} to missing LocalMarket ${fixtureMarketId}`,
+          );
+        }
+        if (fixtureMarket.seed.regionKey !== region.seed.key) {
+          throw new Error(
+            `Phase-8 LocalMarket ${fixtureMarketId} does not belong to Region ${intent.regionId}`,
+          );
+        }
+        marketId = fixtureMarketId;
+      } else {
+        const matchingMarkets = stableOrderBy(
+          Array.from(world.markets.values()).filter(
+            (market) => market.seed.regionKey === region.seed.key,
+          ),
+          (market) => market.marketId,
+        );
+        if (matchingMarkets.length !== 1) {
+          throw new Error(
+            `Phase-8 Region ${intent.regionId} must resolve to exactly one live LocalMarket; found ${matchingMarkets.length}`,
+          );
+        }
+        marketId = matchingMarkets[0]!.marketId;
+      }
+
+      const key = `${intent.regionId}|${marketId}|${intent.goodId}|MAIN`;
 
       if (!intentsByMarketGoodPass.has(key)) {
         intentsByMarketGoodPass.set(key, {
@@ -177,14 +213,23 @@ export const createPhase8Handler = (options?: {
       }
 
       // Use the price Phase 6 produced this tick when present (Handoff/04 section 9:
-      // "Phase 7 trade and Phase 8 clearing use the resulting Phase-6 price"), falling
-      // back to the world's current price so callers that only exercise Phase 8 in
-      // isolation (no Phase-6 handler run this tick) are unaffected.
+      // "Phase 7 trade and Phase 8 clearing use the resulting Phase-6 price"). Direct
+      // Phase-8 fixtures may use the live carried LocalMarket price, but there is no
+      // numeric fallback: missing canonical price evidence is a malformed fixture/state.
       const market = world.markets.get(group.marketId);
-      const marketPrice =
-        context.marketPrices.get(marketPriceKey(group.marketId, group.goodId as GoodId)) ??
-        market?.priceByGood.get(group.goodId as GoodId) ??
-        10;
+      if (market === undefined) {
+        throw new Error(`Phase-8 LocalMarket ${group.marketId} disappeared before clearing`);
+      }
+      const phase6Price = context.marketPrices.get(
+        marketPriceKey(group.marketId, group.goodId as GoodId),
+      );
+      const carriedPrice = market.priceByGood.get(group.goodId as GoodId);
+      const marketPrice = phase6Price ?? carriedPrice;
+      if (marketPrice === undefined || !Number.isFinite(marketPrice) || marketPrice <= 0) {
+        throw new Error(
+          `Phase-8 requires a finite positive canonical price for ${group.marketId}/${group.goodId}`,
+        );
+      }
 
       // Settlement facts belong to the region, not to this handler. An allocation is only
       // settleable onto authoritative stock if it names the currency the buyer and seller
@@ -197,8 +242,21 @@ export const createPhase8Handler = (options?: {
       // The rate therefore follows the destination, and one policy read feeds both the
       // effective demand a buyer can afford and the gross price the allocation records.
       const region = world.regions.get(group.regionId as RegionId);
-      const marketCurrencyId = region?.settlementCurrencyId ?? ("cur:reserve" as CurrencyId);
-      const destinationStateId = region?.controllerStateId ?? null;
+      if (region === undefined) {
+        throw new Error(`Phase-8 Region ${group.regionId} disappeared before clearing`);
+      }
+      if (market.seed.regionKey !== region.seed.key) {
+        throw new Error(
+          `Phase-8 LocalMarket ${group.marketId} does not belong to Region ${group.regionId}`,
+        );
+      }
+      const marketCurrencyId = region.settlementCurrencyId;
+      if (!world.currencies.has(marketCurrencyId)) {
+        throw new Error(
+          `Phase-8 Region ${group.regionId} settlement currency ${marketCurrencyId} is missing from WorldState`,
+        );
+      }
+      const destinationStateId = region.controllerStateId;
       const { assessedTaxRate, collectionEfficiency } = resolveTaxPolicy(
         taxPolicy,
         destinationStateId,
