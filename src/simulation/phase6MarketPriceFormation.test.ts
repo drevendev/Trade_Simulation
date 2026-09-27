@@ -9,7 +9,6 @@
 import { describe, expect, it } from "vitest";
 import type {
   CohortId,
-  CurrencyId,
   GoodId,
   MarketId,
   ProductionUnitId,
@@ -32,7 +31,6 @@ const FOOD = "good:food" as GoodId;
 
 interface Counterparties {
   readonly regionId: RegionId;
-  readonly currencyId: CurrencyId;
   readonly sellerUnitId: ProductionUnitId;
   readonly buyerCohortId: CohortId;
 }
@@ -66,7 +64,6 @@ function counterparties(world: WorldState): Counterparties {
 
     return {
       regionId: region.regionId,
-      currencyId: region.settlementCurrencyId,
       sellerUnitId: seller.productionUnitId,
       buyerCohortId: buyer.cohortId,
     };
