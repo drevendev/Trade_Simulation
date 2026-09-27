@@ -58,6 +58,10 @@ import {
   createPhase14ProductionUnitLifecycleHandler,
 } from "./productionUnitLifecycle";
 import {
+  applyJurisdictionTransitionsAtPhase1,
+  resolveEffectiveJurisdictionAtPhase1,
+} from "./phase1JurisdictionTransition";
+import {
   applyWageOfferStateTransition,
   createPhase15WageOfferUpdateHandler,
 } from "./wageOfferUpdate";
@@ -489,11 +493,10 @@ function applyProductionSignalCloseTransition(world: WorldState, context: TickCo
 function phase1JurisdictionHandler(): PhaseHandler {
   return (world, context) => {
     if (context.phase !== 1) return context;
-    const effectiveJurisdictionByRegion = new Map<RegionId, StateId | null>();
-    for (const region of stableOrderBy(world.regions.values(), (candidate) => String(candidate.regionId))) {
-      effectiveJurisdictionByRegion.set(region.regionId, region.controllerStateId);
-    }
-    return { ...context, effectiveJurisdictionByRegion };
+    return {
+      ...context,
+      effectiveJurisdictionByRegion: resolveEffectiveJurisdictionAtPhase1(world, context.tick),
+    };
   };
 }
 
@@ -545,7 +548,8 @@ export function executeM4ClosedEconomyTick(
 
   return executeStatefulTick(openingWorld, tick, handler, (phase, world, context) => {
     if (phase === 1) {
-      return applyProductionUnitLifecycleTransitionsAtPhase1(world, tick);
+      const afterJurisdiction = applyJurisdictionTransitionsAtPhase1(world, tick);
+      return applyProductionUnitLifecycleTransitionsAtPhase1(afterJurisdiction, tick);
     }
     if (phase === 4) {
       let next = world;
