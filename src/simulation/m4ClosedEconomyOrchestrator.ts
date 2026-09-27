@@ -335,7 +335,10 @@ function phase9HouseholdHandler(): PhaseHandler {
   };
 }
 
-function effectiveMinimumWageFloorByUnit(world: WorldState): ReadonlyMap<ProductionUnitId, number> {
+function effectiveMinimumWageFloorByUnit(
+  world: WorldState,
+  effectiveJurisdictionByRegion: ReadonlyMap<RegionId, StateId | null>,
+): ReadonlyMap<ProductionUnitId, number> {
   const result = new Map<ProductionUnitId, number>();
   for (const unit of stableOrderBy(world.productionUnits.values(), (candidate) => String(candidate.productionUnitId))) {
     // Phase 1 can activate a unit before Phase 15, so compute floors for the complete
@@ -349,7 +352,17 @@ function effectiveMinimumWageFloorByUnit(world: WorldState): ReadonlyMap<Product
     }
     const recipe = world.definitionRegistry.recipes[unit.seed.recipeId];
     if (recipe === undefined) throw new Error(`ProductionUnit ${String(unit.productionUnitId)} references missing recipe`);
-    const controllerStateId = region[0]!.controllerStateId;
+    const controllerStateId = effectiveJurisdictionByRegion.get(region[0]!.regionId);
+    if (controllerStateId === undefined) {
+      throw new Error(
+        `Missing Phase-1 effective jurisdiction for Region ${String(region[0]!.regionId)} at Phase 15`,
+      );
+    }
+    if (controllerStateId !== region[0]!.controllerStateId) {
+      throw new Error(
+        `Phase-15 jurisdiction snapshot disagrees with persisted controller for Region ${String(region[0]!.regionId)}`,
+      );
+    }
     if (controllerStateId === null) {
       result.set(unit.productionUnitId, 0);
       continue;
@@ -366,6 +379,18 @@ function effectiveMinimumWageFloorByUnit(world: WorldState): ReadonlyMap<Product
     );
   }
   return result;
+}
+
+function phase15WageOfferHandler(): PhaseHandler {
+  return (world, context, pendingTransitions) => {
+    if (context.phase !== 15) return context;
+    return createPhase15WageOfferUpdateHandler({
+      effectiveMinimumWageFloorByUnit: effectiveMinimumWageFloorByUnit(
+        world,
+        context.effectiveJurisdictionByRegion,
+      ),
+    })(world, context, pendingTransitions);
+  };
 }
 
 const clampSignal = (value: number, minimum: number, maximum: number): number =>
@@ -524,9 +549,7 @@ export function executeM4ClosedEconomyTick(
       : { collectTelemetry: options.collectMarketTelemetry }),
     taxPolicy: options.taxPolicy,
   });
-  const phase15 = createPhase15WageOfferUpdateHandler({
-    effectiveMinimumWageFloorByUnit: effectiveMinimumWageFloorByUnit(openingWorld),
-  });
+  const phase15 = phase15WageOfferHandler();
 
   const handler = composePhaseHandlers(
     phase1JurisdictionHandler(),

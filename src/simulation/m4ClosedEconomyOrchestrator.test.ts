@@ -384,6 +384,80 @@ describe("REQ-PRODUCTION-008 canonical M4 closed-economy orchestration", () => {
     expect(signals.outputSalesEma).toBeCloseTo(6);
   });
 
+  it("uses the Phase-1 effective jurisdiction for the Phase-15 minimum-wage floor", () => {
+    const openingBase = oneRegionWorld();
+    const region = [...openingBase.regions.values()][0]!;
+    expect(region.controllerStateId).not.toBeNull();
+
+    const targetStateId = [...openingBase.states.keys()]
+      .sort((left, right) => String(left).localeCompare(String(right)))
+      .find((stateId) => stateId !== region.controllerStateId);
+    expect(targetStateId).toBeDefined();
+    const targetState = openingBase.states.get(targetStateId!)!;
+
+    const activeUnit = [...openingBase.productionUnits.values()]
+      .sort((left, right) => String(left.productionUnitId).localeCompare(String(right.productionUnitId)))
+      .find((unit) => unit.status === "ACTIVE");
+    expect(activeUnit).toBeDefined();
+    const recipe = openingBase.definitionRegistry.recipes[activeUnit!.seed.recipeId];
+    expect(recipe).toBeDefined();
+
+    const targetFloor = Math.max(activeUnit!.wageOffer + 5, 25);
+    const existingPolicy = targetState.seed.policy.m4ProductionPlanning;
+    const targetPolicy = {
+      minimumWageFloorByRegionKey: {
+        ...(existingPolicy?.minimumWageFloorByRegionKey ?? {}),
+        [region.seed.key]: {
+          ...(existingPolicy?.minimumWageFloorByRegionKey[region.seed.key] ?? {}),
+          [recipe!.laborCategory]: targetFloor,
+        },
+      },
+      mandatoryKnownCashByProductionUnitKey:
+        existingPolicy?.mandatoryKnownCashByProductionUnitKey ?? {},
+      lifecycleOwnershipAllowed: true,
+      lifecycleProductionAllowed: true,
+    };
+    const states = new Map(openingBase.states);
+    states.set(targetStateId!, {
+      ...targetState,
+      seed: {
+        ...targetState.seed,
+        policy: {
+          ...targetState.seed.policy,
+          m4ProductionPlanning: targetPolicy,
+        },
+      },
+    });
+
+    const opening: WorldState = {
+      ...openingBase,
+      states,
+      pendingTransitions: {
+        ...openingBase.pendingTransitions,
+        jurisdictionChanges: [
+          ...openingBase.pendingTransitions.jurisdictionChanges,
+          {
+            regionId: region.regionId,
+            nextControllerStateId: targetStateId!,
+            activateTick: 5,
+          },
+        ],
+      },
+    };
+
+    const result = executeM4ClosedEconomyTick(opening, 5, options(opening));
+    expect(result.phaseBoundaryError).toBeUndefined();
+    expect(result.context.effectiveJurisdictionByRegion.get(region.regionId)).toBe(targetStateId);
+    expect(result.world.regions.get(region.regionId)!.controllerStateId).toBe(targetStateId);
+
+    const update = (result.context.wageOfferUpdates ?? []).find(
+      (candidate) => candidate.unitId === activeUnit!.productionUnitId,
+    );
+    expect(update).toBeDefined();
+    expect(update!.effectiveMinimumWageFloor).toBe(targetFloor);
+    expect(update!.nextOffer).toBeGreaterThanOrEqual(targetFloor);
+  });
+
   it("is stable under irrelevant live-map insertion-order changes", () => {
     const opening = oneRegionWorld();
     const reordered: WorldState = {
