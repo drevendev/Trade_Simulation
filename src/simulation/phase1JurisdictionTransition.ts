@@ -20,6 +20,19 @@ export function resolveEffectiveJurisdictionAtPhase1(
     );
   }
 
+  const stale = world.pendingTransitions.jurisdictionChanges.filter(
+    (change) => change.activateTick < currentTick,
+  );
+  if (stale.length > 0) {
+    const first = stableOrderBy(
+      stale,
+      (change) => `${String(change.regionId)}|${change.activateTick}`,
+    )[0]!;
+    throw new Error(
+      `Stale Phase-1 jurisdiction change for Region ${String(first.regionId)} was not activated at tick ${first.activateTick}`,
+    );
+  }
+
   const dueByRegion = new Map<RegionId, StateId | null>();
   const dueChanges = stableOrderBy(
     world.pendingTransitions.jurisdictionChanges.filter(
