@@ -402,4 +402,231 @@ describe("REQ-PRODUCTION-008 canonical M4 closed-economy orchestration", () => {
 
     expect(normalizedOutcome(left.world, left)).toBe(normalizedOutcome(right.world, right));
   });
+
+  it("uses pre-existing ACTIVE OUTPUT in Phase 4 and recomputes MAIN from remaining/post-production stock", () => {
+    const openingBase = oneRegionWorld("region:b2-urban");
+    const sourceWorld = baselineWorld();
+    const region = [...openingBase.regions.values()][0]!;
+    const currencyId = region.settlementCurrencyId;
+    const iron = "good:iron" as GoodId;
+    const wood = "good:wood" as GoodId;
+    const tools = "good:tools" as GoodId;
+    const ironOre = "resource:iron-ore" as any;
+
+    const buyer = [...openingBase.productionUnits.values()].find(
+      (unit) => unit.seed.recipeId === "recipe:tools-craft" && unit.status === "ACTIVE",
+    );
+    const sourceSeller = [...sourceWorld.productionUnits.values()].find(
+      (unit) => unit.seed.recipeId === "recipe:iron-mine" && unit.status === "ACTIVE",
+    );
+    expect(buyer).toBeDefined();
+    expect(sourceSeller).toBeDefined();
+
+    const fundedBuyer = {
+      ...buyer!,
+      wallet: new Map([[currencyId, 100_000]]),
+      inputInventory: new Map<GoodId, number>([[iron, 0], [wood, 10_000]]),
+      outputInventory: new Map<GoodId, number>([[tools, 0]]),
+      installedCapital: 1,
+      status: "ACTIVE" as const,
+      signals: {
+        ...buyer!.signals,
+        sellThroughEma: 0,
+        marginSignalEma: 0,
+        outputSalesEma: 0,
+        inputUseEma: {},
+      },
+    };
+    const carriedSeller = {
+      ...sourceSeller!,
+      seed: { ...sourceSeller!.seed, regionKey: region.seed.key },
+      wallet: new Map([[currencyId, 100_000]]),
+      inputInventory: new Map<GoodId, number>(),
+      outputInventory: new Map<GoodId, number>([[iron, 20]]),
+      investmentInventory: new Map<GoodId, number>(),
+      installedCapital: 1,
+      wageOffer: Math.max(sourceSeller!.wageOffer, 10),
+      status: "ACTIVE" as const,
+      signals: {
+        ...sourceSeller!.signals,
+        outputSalesEma: 4,
+        sellThroughEma: 0.8,
+        marginSignalEma: 0.2,
+        inputUseEma: {},
+      },
+    };
+    const productiveRegion = {
+      ...region,
+      seed: {
+        ...region.seed,
+        infrastructure: { ...region.seed.infrastructure, mines: 1 },
+        deposits: [
+          ...region.seed.deposits.filter((deposit) => deposit.resourceId !== ironOre),
+          { resourceId: ironOre, initialQuantity: 4_000, initiallyKnown: true },
+        ],
+      },
+      resourceDeposits: new Map([
+        ...region.resourceDeposits.entries(),
+        [ironOre, 4_000] as const,
+      ]),
+    };
+    const opening: WorldState = {
+      ...openingBase,
+      regions: new Map([[productiveRegion.regionId, productiveRegion]]),
+      productionUnits: new Map([
+        [fundedBuyer.productionUnitId, fundedBuyer],
+        [carriedSeller.productionUnitId, carriedSeller],
+      ]),
+    };
+
+    const result = executeM4ClosedEconomyTick(opening, 1, options(opening));
+    const carriedIntent = (result.context.phase4CarriedOutputIntents ?? []).find(
+      (intent) =>
+        intent.actor.type === "PRODUCTION_UNIT" &&
+        intent.actor.productionUnitId === carriedSeller.productionUnitId &&
+        intent.goodId === iron,
+    );
+    expect(carriedIntent).toMatchObject({
+      side: "SELL",
+      purpose: "INVENTORY_REBALANCE",
+      inventoryBucket: "OUTPUT",
+      desiredQuantity: 12,
+      minimumReserveQuantity: 8,
+    });
+
+    const phase4Sale = (result.context.phase4MarketAllocations ?? []).find(
+      (allocation) => allocation.sellerIntentId === carriedIntent!.id,
+    );
+    expect(phase4Sale?.pass).toBe("PRE_PRODUCTION");
+    expect(phase4Sale!.quantity).toBeGreaterThan(0);
+    expect(phase4Sale!.quantity).toBeLessThanOrEqual(12);
+
+    const buyerExecution = (result.context.productionExecutions ?? []).find(
+      (execution) => execution.unitId === fundedBuyer.productionUnitId,
+    )!;
+    expect(buyerExecution.inputConsumedByGood[iron]).toBeGreaterThan(0);
+
+    const sellerExecution = (result.context.productionExecutions ?? []).find(
+      (execution) => execution.unitId === carriedSeller.productionUnitId,
+    )!;
+    expect(sellerExecution.outputProducedQuantity).toBeGreaterThan(0);
+    const mainIntent = (result.context.productionOutputIntents ?? []).find(
+      (intent) =>
+        intent.actor.type === "PRODUCTION_UNIT" &&
+        intent.actor.productionUnitId === carriedSeller.productionUnitId &&
+        intent.goodId === iron,
+    )!;
+    expect(mainIntent.desiredQuantity).toBeCloseTo(
+      Math.max(0, 20 - phase4Sale!.quantity + sellerExecution.outputProducedQuantity - 8),
+    );
+
+    // The PRE_PRODUCTION seller is phase-scoped and never forwarded as a residual MAIN intent.
+    expect(
+      result.context.marketAllocations.some(
+        (allocation) => allocation.sellerIntentId === carriedIntent!.id,
+      ),
+    ).toBe(false);
+
+    // Caller-owned opening stocks remain unchanged.
+    expect(opening.productionUnits.get(fundedBuyer.productionUnitId)!.inputInventory.get(iron)).toBe(0);
+    expect(opening.productionUnits.get(carriedSeller.productionUnitId)!.outputInventory.get(iron)).toBe(20);
+
+    const reordered: WorldState = {
+      ...opening,
+      productionUnits: reverseMap(opening.productionUnits),
+    };
+    const replay = executeM4ClosedEconomyTick(reordered, 1, options(reordered));
+    expect(normalizedOutcome(result.world, result)).toBe(normalizedOutcome(replay.world, replay));
+    expect(
+      (result.context.phase4CarriedOutputIntents ?? []).map((intent) => [
+        intent.id,
+        intent.desiredQuantity,
+        intent.minimumReserveQuantity,
+      ]),
+    ).toEqual(
+      (replay.context.phase4CarriedOutputIntents ?? []).map((intent) => [
+        intent.id,
+        intent.desiredQuantity,
+        intent.minimumReserveQuantity,
+      ]),
+    );
+  });
+
+  it("uses zero reserve for CLOSING carried OUTPUT and never offers a Phase-4 fill twice in MAIN", () => {
+    const openingBase = oneRegionWorld("region:b2-urban");
+    const sourceWorld = baselineWorld();
+    const region = [...openingBase.regions.values()][0]!;
+    const currencyId = region.settlementCurrencyId;
+    const iron = "good:iron" as GoodId;
+    const wood = "good:wood" as GoodId;
+    const tools = "good:tools" as GoodId;
+
+    const buyer = [...openingBase.productionUnits.values()].find(
+      (unit) => unit.seed.recipeId === "recipe:tools-craft" && unit.status === "ACTIVE",
+    );
+    const sourceSeller = [...sourceWorld.productionUnits.values()].find(
+      (unit) => unit.seed.recipeId === "recipe:iron-mine" && unit.status === "ACTIVE",
+    );
+    expect(buyer).toBeDefined();
+    expect(sourceSeller).toBeDefined();
+
+    const fundedBuyer = {
+      ...buyer!,
+      wallet: new Map([[currencyId, 100_000]]),
+      inputInventory: new Map<GoodId, number>([[iron, 0], [wood, 10_000]]),
+      outputInventory: new Map<GoodId, number>([[tools, 0]]),
+      installedCapital: 1,
+      status: "ACTIVE" as const,
+    };
+    const closingSeller = {
+      ...sourceSeller!,
+      seed: { ...sourceSeller!.seed, regionKey: region.seed.key },
+      wallet: new Map([[currencyId, 0]]),
+      inputInventory: new Map<GoodId, number>(),
+      outputInventory: new Map<GoodId, number>([[iron, 5]]),
+      investmentInventory: new Map<GoodId, number>(),
+      installedCapital: 0,
+      status: "CLOSING" as const,
+      signals: { ...sourceSeller!.signals, outputSalesEma: 100 },
+    };
+    const opening: WorldState = {
+      ...openingBase,
+      productionUnits: new Map([
+        [fundedBuyer.productionUnitId, fundedBuyer],
+        [closingSeller.productionUnitId, closingSeller],
+      ]),
+    };
+
+    const result = executeM4ClosedEconomyTick(opening, 1, options(opening));
+    const carriedIntent = (result.context.phase4CarriedOutputIntents ?? []).find(
+      (intent) =>
+        intent.actor.type === "PRODUCTION_UNIT" &&
+        intent.actor.productionUnitId === closingSeller.productionUnitId,
+    )!;
+    expect(carriedIntent).toMatchObject({
+      desiredQuantity: 5,
+      minimumReserveQuantity: 0,
+      inventoryBucket: "OUTPUT",
+    });
+
+    const phase4Sale = (result.context.phase4MarketAllocations ?? []).find(
+      (allocation) => allocation.sellerIntentId === carriedIntent.id,
+    )!;
+    expect(phase4Sale.quantity).toBe(5);
+
+    const mainIntent = (result.context.productionOutputIntents ?? []).find(
+      (intent) =>
+        intent.actor.type === "PRODUCTION_UNIT" &&
+        intent.actor.productionUnitId === closingSeller.productionUnitId,
+    )!;
+    expect(mainIntent.desiredQuantity).toBe(0);
+    expect(
+      result.context.marketAllocations.some(
+        (allocation) => allocation.sellerIntentId === carriedIntent.id,
+      ),
+    ).toBe(false);
+    expect(result.world.productionUnits.get(closingSeller.productionUnitId)!.outputInventory.get(iron) ?? 0).toBe(0);
+    expect(opening.productionUnits.get(closingSeller.productionUnitId)!.outputInventory.get(iron)).toBe(5);
+  });
+
 });

@@ -18,6 +18,7 @@ import {
   type MarketAllocation,
 } from "./marketClearing";
 import type { MarketIntent } from "./marketIntent";
+import { buildPhase4CarriedOutputSellIntents } from "./phase4CarriedOutput";
 import { executeMarketSettlement, type TaxPolicyProvider } from "./marketSettlement";
 import {
   applyMarketSettlementTransition,
@@ -163,7 +164,15 @@ function phase4ProcurementHandler(options: M4ClosedEconomyOptions): PhaseHandler
     if (context.phase !== 4) return context;
     const region = requireSingleRegion(world);
     const market = requireSingleLocalMarket(world, region);
-    const intents = context.productionMarketIntents ?? [];
+    const phase4CarriedOutputIntents = buildPhase4CarriedOutputSellIntents(
+      world,
+      context.tick,
+      context.productionPlans ?? [],
+    );
+    const intents = [
+      ...(context.productionMarketIntents ?? []),
+      ...phase4CarriedOutputIntents,
+    ];
     const buyers = intents.filter(
       (intent) => intent.side === "BUY" && intent.purpose === "INPUT" && intent.regionId === region.regionId,
     );
@@ -235,6 +244,7 @@ function phase4ProcurementHandler(options: M4ClosedEconomyOptions): PhaseHandler
 
     return {
       ...context,
+      phase4CarriedOutputIntents,
       phase4MarketAllocations: allocations,
       transactions: [...context.transactions, ...settlementTransactions],
     };
@@ -394,10 +404,18 @@ function applyProductionSignalCloseTransition(world: WorldState, context: TickCo
       (outputOfferByUnit.get(intent.actor.productionUnitId) ?? 0) + intent.desiredQuantity,
     );
   }
+  // Phase 5 recomputes MAIN from remaining stock. Count only quantities actually sold
+  // during Phase 4 in addition to that recomputed offer, so unsold carried stock is not
+  // counted twice in the sell-through denominator.
+  for (const allocation of context.phase4MarketAllocations ?? []) {
+    if (allocation.seller.type !== "PRODUCTION_UNIT" || allocation.sellerInventoryBucket !== "OUTPUT") continue;
+    const unitId = allocation.seller.productionUnitId;
+    outputOfferByUnit.set(unitId, (outputOfferByUnit.get(unitId) ?? 0) + allocation.quantity);
+  }
 
   const outputSoldByUnit = new Map<ProductionUnitId, number>();
   const cashRevenueByUnit = new Map<ProductionUnitId, number>();
-  for (const allocation of context.marketAllocations) {
+  for (const allocation of [...(context.phase4MarketAllocations ?? []), ...context.marketAllocations]) {
     if (allocation.seller.type !== "PRODUCTION_UNIT" || allocation.sellerInventoryBucket !== "OUTPUT") continue;
     const unitId = allocation.seller.productionUnitId;
     outputSoldByUnit.set(unitId, (outputSoldByUnit.get(unitId) ?? 0) + allocation.quantity);
