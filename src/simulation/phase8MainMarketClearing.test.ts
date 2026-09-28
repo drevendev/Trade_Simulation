@@ -136,6 +136,38 @@ function buildIntents(
   ];
 }
 
+function buildStateBuyerIntents(
+  actors: Counterparties,
+  purpose: MarketIntent["purpose"],
+  maxSpend: number,
+): MarketIntent[] {
+  return [
+    {
+      id: createMarketIntentId("mi:self-procurement-seller"),
+      actor: { type: "PRODUCTION_UNIT" as const, productionUnitId: actors.sellerUnitId },
+      regionId: actors.regionId,
+      goodId: FOOD,
+      side: "SELL" as const,
+      purpose: "INVENTORY_REBALANCE" as const,
+      desiredQuantity: 10,
+      minimumReserveQuantity: 0,
+      inventoryBucket: "OUTPUT" as const,
+      sourcePlanId: "plan:self-procurement-supply",
+    },
+    {
+      id: createMarketIntentId("mi:self-procurement-buyer"),
+      actor: { type: "STATE" as const, stateId: actors.stateId },
+      regionId: actors.regionId,
+      goodId: FOOD,
+      side: "BUY" as const,
+      purpose,
+      desiredQuantity: 1,
+      maxSpend,
+      sourcePlanId: "plan:self-procurement-demand",
+    },
+  ];
+}
+
 function buildWorld(): WorldState {
   return buildInitialWorld(baselineScenario, baselineDefinitionPack, createDefaultSimulationConfig(), 42);
 }
@@ -186,6 +218,72 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
     expect(telemetry.sellerNetPrice).toBe(SELLER_NET_PRICE);
     expect(telemetry.householdGrossPrice).toBeCloseTo(10.8, 10);
     expect(telemetry.consumptionTaxCollected).toBeCloseTo(allocation.consumptionTaxAmount, 10);
+  });
+
+  it("exempts destination-State PUBLIC_PROCUREMENT before affordability while preserving household tax telemetry", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+
+    const result = executeTick(
+      world,
+      1,
+      world.pendingTransitions,
+      createPhase8Handler({
+        getFixtureIntents: () =>
+          buildStateBuyerIntents(actors, "PUBLIC_PROCUREMENT", 10.1),
+        getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+        collectTelemetry: true,
+        taxPolicy: fixtureTaxPolicy,
+      }),
+    );
+
+    expect(result.context.marketAllocations).toHaveLength(1);
+    const allocation = result.context.marketAllocations[0]!;
+    expect(allocation.destinationStateId).toBe(actors.stateId);
+    expect(allocation.sellerNetUnitPrice).toBe(SELLER_NET_PRICE);
+    expect(allocation.buyerGrossUnitPrice).toBe(SELLER_NET_PRICE);
+    expect(allocation.quantity).toBeCloseTo(1, 10);
+    expect(allocation.consumptionTaxAmount).toBe(0);
+
+    const aggregates = Array.from(result.context.marketClearingAggregates.values());
+    expect(aggregates).toHaveLength(1);
+    expect(aggregates[0]!.effectiveDemandQuantity).toBeCloseTo(1, 10);
+    expect(aggregates[0]!.clearedQuantity).toBeCloseTo(1, 10);
+
+    expect(result.context.marketTelemetry).toHaveLength(1);
+    expect(result.context.marketTelemetry[0]!.householdGrossPrice).toBeCloseTo(10.8, 10);
+    expect(result.context.marketTelemetry[0]!.consumptionTaxCollected).toBe(0);
+  });
+
+  it("does not exempt the same destination State when the BUY purpose is not PUBLIC_PROCUREMENT", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const expectedQuantity = 10.1 / 10.8;
+
+    const result = executeTick(
+      world,
+      1,
+      world.pendingTransitions,
+      createPhase8Handler({
+        getFixtureIntents: () =>
+          buildStateBuyerIntents(actors, "INVESTMENT", 10.1),
+        getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+        collectTelemetry: true,
+        taxPolicy: fixtureTaxPolicy,
+      }),
+    );
+
+    expect(result.context.marketAllocations).toHaveLength(1);
+    const allocation = result.context.marketAllocations[0]!;
+    expect(allocation.destinationStateId).toBe(actors.stateId);
+    expect(allocation.buyerGrossUnitPrice).toBeCloseTo(10.8, 10);
+    expect(allocation.quantity).toBeCloseTo(expectedQuantity, 10);
+    expect(allocation.consumptionTaxAmount).toBeCloseTo(expectedQuantity * 0.8, 10);
+
+    const aggregates = Array.from(result.context.marketClearingAggregates.values());
+    expect(aggregates).toHaveLength(1);
+    expect(aggregates[0]!.effectiveDemandQuantity).toBeCloseTo(expectedQuantity, 10);
+    expect(aggregates[0]!.clearedQuantity).toBeCloseTo(expectedQuantity, 10);
   });
 
   it("settles only the collected tax, leaving assessed-but-uncollected tax with the buyer", () => {
