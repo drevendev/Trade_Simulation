@@ -8,6 +8,7 @@
  */
 import type { RegionId, StateId } from "../domain/id";
 import { stableOrderBy } from "../domain/ordering";
+import { assertValidJurisdictionActivateTick } from "./pendingTransitions";
 import type { WorldState } from "./worldState";
 
 export function resolveEffectiveJurisdictionAtPhase1(
@@ -18,6 +19,20 @@ export function resolveEffectiveJurisdictionAtPhase1(
     throw new Error(
       `Phase-1 jurisdiction tick must be a non-negative integer, got ${String(currentTick)}`,
     );
+  }
+
+  for (const change of stableOrderBy(
+    world.pendingTransitions.jurisdictionChanges,
+    (candidate) => `${String(candidate.regionId)}|${String(candidate.activateTick)}`,
+  )) {
+    try {
+      assertValidJurisdictionActivateTick(change.activateTick);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Invalid Phase-1 jurisdiction change for Region ${String(change.regionId)}: ${reason}`,
+      );
+    }
   }
 
   const stale = world.pendingTransitions.jurisdictionChanges.filter(

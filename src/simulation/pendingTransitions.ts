@@ -9,6 +9,18 @@
 import type { RegionId, StateId, MonetaryAuthorityId } from "../domain/id";
 import type { PendingTransitions } from "./worldState";
 
+export function assertValidJurisdictionActivateTick(activateTick: number): void {
+  if (
+    !Number.isFinite(activateTick) ||
+    !Number.isInteger(activateTick) ||
+    activateTick < 0
+  ) {
+    throw new Error(
+      `Jurisdiction activateTick must be a finite non-negative integer, got ${String(activateTick)}`,
+    );
+  }
+}
+
 export function createEmptyPendingTransitions(): PendingTransitions {
   return {
     jurisdictionChanges: [],
@@ -25,6 +37,7 @@ export function addJurisdictionChange(
   nextControllerStateId: StateId | null,
   activateTick: number,
 ): PendingTransitions {
+  assertValidJurisdictionActivateTick(activateTick);
   return {
     ...pending,
     jurisdictionChanges: [

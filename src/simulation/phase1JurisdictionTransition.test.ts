@@ -103,6 +103,35 @@ describe("REQ-CORE-005 Phase-1 jurisdiction activation", () => {
     expect(applyJurisdictionTransitionsAtPhase1(world, 9)).toBe(world);
   });
 
+  it("fails closed on malformed queued activation ticks before stale/due classification", () => {
+    const opening = baselineWorld();
+    const region = [...opening.regions.values()][0]!;
+    const target = distinctTarget(opening, region.regionId);
+
+    for (const activateTick of [Number.NaN, Number.POSITIVE_INFINITY, 4.5, -1]) {
+      const world: WorldState = {
+        ...opening,
+        pendingTransitions: {
+          ...opening.pendingTransitions,
+          jurisdictionChanges: [
+            { regionId: region.regionId, nextControllerStateId: target, activateTick },
+          ],
+        },
+      };
+
+      expect(() => resolveEffectiveJurisdictionAtPhase1(world, 5)).toThrow(
+        /Invalid Phase-1 jurisdiction change/,
+      );
+      expect(() => applyJurisdictionTransitionsAtPhase1(world, 5)).toThrow(
+        /Invalid Phase-1 jurisdiction change/,
+      );
+      expect(world.regions.get(region.regionId)!.controllerStateId).toBe(
+        region.controllerStateId,
+      );
+      expect(world.pendingTransitions.jurisdictionChanges).toHaveLength(1);
+    }
+  });
+
   it("fails closed instead of silently preserving an overdue jurisdiction change", () => {
     const opening = baselineWorld();
     const region = [...opening.regions.values()][0]!;

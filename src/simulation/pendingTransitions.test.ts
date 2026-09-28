@@ -71,6 +71,18 @@ describe("PendingTransitions (REQ-CORE-005)", () => {
 
       expect(updated.jurisdictionChanges[0]!.nextControllerStateId).toBe(null);
     });
+
+    it("rejects malformed activation ticks before they enter the jurisdiction queue", () => {
+      const transitions = createEmptyPendingTransitions();
+
+      for (const activateTick of [Number.NaN, Number.POSITIVE_INFINITY, 2.5, -1]) {
+        expect(() =>
+          addJurisdictionChange(transitions, regionId, stateId1, activateTick),
+        ).toThrow(/finite non-negative integer/);
+      }
+
+      expect(transitions.jurisdictionChanges).toEqual([]);
+    });
   });
 
   describe("policy changes", () => {
