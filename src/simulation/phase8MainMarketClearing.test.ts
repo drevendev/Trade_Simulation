@@ -276,6 +276,32 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
     expect(result.context.marketTelemetry[0]!.consumptionTaxCollected).toBe(0);
   });
 
+  it("treats maxSpend = 0 as zero effective demand and clears nothing", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+
+    const result = executeTick(
+      world,
+      1,
+      world.pendingTransitions,
+      createPhase8Handler({
+        getFixtureIntents: () => buildIntents(actors, 1, 0),
+        getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
+        collectTelemetry: false,
+        taxPolicy: fixtureTaxPolicy,
+      }),
+    );
+
+    expect(result.reconciliationErrors).toBeNull();
+    expect(result.context.marketAllocations).toHaveLength(0);
+
+    const aggregates = Array.from(result.context.marketClearingAggregates.values());
+    expect(aggregates).toHaveLength(1);
+    expect(aggregates[0]!.effectiveDemandQuantity).toBe(0);
+    expect(aggregates[0]!.clearedQuantity).toBe(0);
+    expect(aggregates[0]!.offeredQuantity).toBeGreaterThan(0);
+  });
+
   it("keeps allocation identity and emitted group order stable when cross-good intent insertion is reversed", () => {
     const world = buildWorld();
     const actors = counterparties(world);

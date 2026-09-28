@@ -282,9 +282,10 @@ export const createPhase8Handler = (options?: {
         computeEffectiveDemand: (intent, grossPrice) => {
           if (intent.side !== "BUY") return 0;
           // Effective demand: min of desired quantity and maxSpend / grossPrice
-          const maxAffordable = (intent as any).maxSpend
-            ? (intent as any).maxSpend / grossPrice
-            : intent.desiredQuantity;
+          const maxAffordable =
+            intent.maxSpend === undefined
+              ? intent.desiredQuantity
+              : intent.maxSpend / grossPrice;
           return Math.min(intent.desiredQuantity, Math.max(0, maxAffordable));
         },
         computeSellableQuantity: (intent) => {
