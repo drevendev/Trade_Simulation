@@ -21,6 +21,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import head_evidence  # noqa: E402
 import record_pull_request as rpr  # noqa: E402
 import schemes  # noqa: E402
 
@@ -33,6 +34,7 @@ QA_LOGIN = "andy-zen-dev"
 ACCEPT = "## Verdict: ACCEPT"
 REFUSE = "## Verdict: REQUEST_CHANGES"
 FINDING = "## SLOPSTER QA: FINDING"
+EVIDENCE = "## Head evidence"
 # The instruction #544 reported, in any of the spellings it could come back in.
 ASKS_FOR_A_FORMAL_REVIEW = re.compile(
     r"formal review\s*[—:-]\s*\*?Approve|\*?Approve\*?\s+or\s+\*?Request changes", re.IGNORECASE
@@ -115,6 +117,53 @@ class OneChannelTests(unittest.TestCase):
         found = rpr.verdicts([], comments, owner)
         self.assertEqual([v["state"] for v in found], ["CHANGES_REQUESTED", "APPROVED"])
         self.assertTrue(all(v["source"] == "comment" for v in found))
+
+
+
+class CarriedAcrossBaseMergesTests(unittest.TestCase):
+    """#765: a base merge moves the head, not the change, and both documents say so.
+
+    The contract tied a verdict to "the exact head" and the guide voided it on every new
+    head, while the forge itself moved heads whenever `master` moved. One document
+    changed without the other would put the author and the verdict owner back under two
+    different rules.
+    """
+
+    def test_both_documents_name_the_comment_the_forge_writes(self):
+        self.assertEqual(head_evidence.HEADING, EVIDENCE)
+        for path in (AGENTS, GUIDE):
+            with self.subTest(document=path.name):
+                self.assertIn(f"`{EVIDENCE}`", flat(path))
+
+    def test_both_documents_carry_a_handoff_and_a_verdict_along_the_chain(self):
+        for path in (AGENTS, GUIDE):
+            with self.subTest(document=path.name):
+                self.assertIn(
+                    "handoff or a verdict naming any head of that chain stands for", flat(path)
+                )
+
+    def test_new_content_is_covered_by_nothing_said_before_it(self):
+        self.assertIn("a head that carries new content is covered by nothing said before it", flat(AGENTS))
+        self.assertIn("says nothing about a head that carries new content", flat(GUIDE))
+
+    def test_the_guide_no_longer_voids_a_verdict_on_every_new_head(self):
+        self.assertNotIn("the verdict on the old head says nothing about the new one", flat(GUIDE))
+
+    def test_the_checks_are_still_required_on_the_head_being_merged(self):
+        self.assertIn("still required green on the head being merged", flat(AGENTS))
+
+    def test_the_comment_is_never_a_verdict(self):
+        self.assertIn("it is never a verdict", flat(AGENTS))
+        # Even from the verdict owner's own account, the form is not read as one.
+        owner = active_scheme()["verdict_owner"]
+        body = "\n".join([f"{EVIDENCE}: `{'a' * 40}`", "", "Measured by the forge on this exact head."])
+        shaped = [{"user": {"login": owner}, "created_at": "2026-09-29T17:24:00Z", "body": body}]
+        self.assertEqual(rpr.verdicts([], shaped, owner), [])
+
+    def test_the_author_is_told_not_to_chase_the_base(self):
+        text = flat(GUIDE)
+        self.assertIn("Do not merge `master` yourself", text)
+        self.assertIn("do not hand off again because the head moved", text)
 
 
 if __name__ == "__main__":
