@@ -135,7 +135,8 @@ Rules:
 \- shipments from earlier ticks whose arrivalTick \== current tick are delivered in Phase 1 and therefore may participate;  
 \- clearing is deterministic and proportional using the same allocation primitive as Phase 8;  
 \- tax treatment is known before affordability;  
-\- unused unmet input demand is recorded, not carried as a hidden order book.
+\- unused unmet input demand is recorded, not carried as a hidden order book.  
+Phase-4 carried-output clarification (M4): pre-existing ProductionUnit OUTPUT may supply PRE\_PRODUCTION INPUT demand; same-tick Phase-5 output may not. ACTIVE uses the Section-17 output reserve; CLOSING uses zero reserve.
 
 ## 9\. Phase-6 price formation
 
