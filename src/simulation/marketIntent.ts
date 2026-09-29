@@ -57,7 +57,8 @@ export interface MarketIntent {
  * - desiredQuantity >= 0 and finite
  * - BUY requires maxSpend >= 0 and finite
  * - SELL requires minimumReserveQuantity >= 0 and finite
- * - actor owns relevant wallet/inventory (verified at settlement, not here)
+ * - unsupported actor kinds and Clan goods sellers are rejected here
+ * - live actor existence, ownership and balances are verified at settlement
  * - inventoryBucket resolves correctly for ProductionUnit vs other actors
  * - all numeric fields are finite and in valid range
  */
@@ -121,6 +122,14 @@ export function validateMarketIntent(intent: MarketIntent): void {
     assertFiniteCanonicalNumber(minimumReserveQuantity, "SELL intent minimumReserveQuantity");
   }
 
+  // ActorRef also serves genesis accounting; not every owner is a market actor.
+  if (intent.actor.type === "MONETARY_AUTHORITY") {
+    throw new Error("MonetaryAuthority is not a MarketIntent actor (HANDOFF-REPAIR-016)");
+  }
+  if (intent.actor.type === "CLAN" && intent.side === "SELL") {
+    throw new Error("Clan SELL intent has no physical goods inventory");
+  }
+
   // Inventory bucket validation
   if (intent.inventoryBucket) {
     const validBuckets = ["GENERAL", "INPUT", "OUTPUT", "INVESTMENT"];
@@ -132,20 +141,19 @@ export function validateMarketIntent(intent: MarketIntent): void {
   // ProductionUnit inventory bucket rules
   if (intent.actor.type === "PRODUCTION_UNIT") {
     if (intent.side === "BUY" && intent.purpose === "INPUT") {
-      if (intent.inventoryBucket && intent.inventoryBucket !== "INPUT") {
+      if (intent.inventoryBucket !== "INPUT") {
         throw new Error(
           `ProductionUnit BUY/INPUT must use INPUT bucket, got ${intent.inventoryBucket}`,
         );
       }
     } else if (intent.side === "BUY" && intent.purpose === "INVESTMENT") {
-      if (intent.inventoryBucket && intent.inventoryBucket !== "INVESTMENT") {
+      if (intent.inventoryBucket !== "INVESTMENT") {
         throw new Error(
           `ProductionUnit BUY/INVESTMENT must use INVESTMENT bucket, got ${intent.inventoryBucket}`,
         );
       }
     } else if (intent.side === "SELL") {
       if (
-        intent.inventoryBucket &&
         intent.inventoryBucket !== "INPUT" &&
         intent.inventoryBucket !== "OUTPUT" &&
         intent.inventoryBucket !== "INVESTMENT"
