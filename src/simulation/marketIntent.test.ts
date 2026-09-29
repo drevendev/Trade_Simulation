@@ -50,7 +50,7 @@ describe("MarketIntent validation", () => {
       expect(() => validateMarketIntent(intent)).not.toThrow();
     });
 
-    it("creates valid SELL intent for Clan", () => {
+    it("rejects Clan SELL because a Clan owns no goods inventory", () => {
       const intent: MarketIntent = {
         id: createMarketIntentId("mi:clan-sell-1"),
         actor: { type: "CLAN", clanId: testClanId },
@@ -64,7 +64,7 @@ describe("MarketIntent validation", () => {
         inventoryBucket: "GENERAL",
       };
 
-      expect(() => validateMarketIntent(intent)).not.toThrow();
+      expect(() => validateMarketIntent(intent)).toThrow(/Clan SELL intent has no physical goods inventory/);
     });
 
     it("creates valid BUY/INPUT intent for ProductionUnit", () => {
@@ -154,7 +154,7 @@ describe("MarketIntent validation", () => {
     it("accepts omitted minimumReserveQuantity (defaults to 0)", () => {
       const intent: MarketIntent = {
         id: createMarketIntentId("mi:sell-no-reserve-1"),
-        actor: { type: "CLAN", clanId: testClanId },
+        actor: { type: "STATE", stateId: testStateId },
         regionId: testRegionId,
         goodId: testGoodId,
         side: "SELL",
