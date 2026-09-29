@@ -852,5 +852,7 @@ Markets section 7 now defines seller commitment identity as persistent ActorRef 
 The corresponding M4 Phase-4 repair is bounded to this endpoint key, deterministic seller pre-ordering, and focused duplicate-endpoint/reserve/order/distinct-bucket regressions. Issue \#251 remains the generic clearing primitive and retains its explicit Phase-4 non-goal. The separate R590 moneyEpsilon affordability defect remains independent.
 
 No new implementation-package file was added; no mirror allowlist change is required. Normal MACHINE synchronization should update the existing Markets mirror.  
-STATUS: SPEC\_REPAIRED / IMPLEMENTATION\_REPAIR\_REQUIRED
+STATUS: SPEC\_REPAIRED / IMPLEMENTATION\_REPAIR\_REQUIRE  
+2026-09-29 — HANDOFF-REPAIR-M4-008 implementation answer  
+For Phase-4 seller availability, group SELL intents by persistent ActorRef \+ goodId \+ normalized inventoryBucket. Before consuming any commitment, compute endpointReserve as the maximum minimumReserveQuantity declared by intents in that endpoint group, defaulting omitted reserves to zero. Then compute each sellable quantity against owned \- endpointReserve \- shared alreadyCommitted in stable persistent-actor-ID then intent-ID order. A lower-reserve intent must not consume stock protected by a higher-reserve same-endpoint intent. Distinct inventory buckets remain independent. This is a focused Phase-4 repair; the separate Phase-4 moneyEpsilon affordability wiring defect remains independent.
 
