@@ -302,6 +302,116 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
     expect(aggregates[0]!.offeredQuantity).toBeGreaterThan(0);
   });
 
+  it("caps Phase-8 offered supply at live stock minus the seller's minimum reserve", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const seller = world.productionUnits.get(actors.sellerUnitId)!;
+    const boundedWorld: WorldState = {
+      ...world,
+      productionUnits: new Map(world.productionUnits).set(actors.sellerUnitId, {
+        ...seller,
+        outputInventory: new Map(seller.outputInventory).set(FOOD, 10),
+      }),
+    };
+    const intents = buildIntents(actors, 10, 1000).map((intent) =>
+      intent.side === "SELL"
+        ? { ...intent, desiredQuantity: 10, minimumReserveQuantity: 6 }
+        : intent,
+    );
+
+    const result = executeTick(
+      boundedWorld,
+      1,
+      boundedWorld.pendingTransitions,
+      createPhase8Handler({
+        getFixtureIntents: () => intents,
+        getFixtureMarketIds: () =>
+          new Map([[actors.regionId, liveMarketId(boundedWorld, actors.regionId)]]),
+        collectTelemetry: true,
+        taxPolicy: fixtureTaxPolicy,
+      }),
+    );
+
+    expect(result.reconciliationErrors).toBeNull();
+    expect(result.context.marketAllocations).toHaveLength(1);
+    expect(result.context.marketAllocations[0]!.quantity).toBeCloseTo(4, 10);
+
+    const aggregate = Array.from(result.context.marketClearingAggregates.values())[0]!;
+    expect(aggregate.offeredQuantity).toBeCloseTo(4, 10);
+    expect(aggregate.clearedQuantity).toBeCloseTo(4, 10);
+    expect(result.context.marketTelemetry[0]!.offeredQuantity).toBeCloseTo(4, 10);
+  });
+
+  it("shares one physical seller stock across duplicate SELL intents independent of insertion order", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const sellerState = world.productionUnits.get(actors.sellerUnitId)!;
+    const boundedWorld: WorldState = {
+      ...world,
+      productionUnits: new Map(world.productionUnits).set(actors.sellerUnitId, {
+        ...sellerState,
+        outputInventory: new Map(sellerState.outputInventory).set(FOOD, 5),
+      }),
+    };
+
+    const [sellerTemplate, buyer] = buildIntents(actors, 10, 1000);
+    const sellerA: MarketIntent = {
+      ...sellerTemplate!,
+      id: createMarketIntentId("mi:issue-251-duplicate-a"),
+      desiredQuantity: 4,
+      minimumReserveQuantity: 0,
+    };
+    const sellerB: MarketIntent = {
+      ...sellerTemplate!,
+      id: createMarketIntentId("mi:issue-251-duplicate-b"),
+      desiredQuantity: 4,
+      minimumReserveQuantity: 0,
+    };
+
+    const run = (sellerOrder: MarketIntent[]) =>
+      executeTick(
+        boundedWorld,
+        1,
+        boundedWorld.pendingTransitions,
+        createPhase8Handler({
+          getFixtureIntents: () => [...sellerOrder, buyer!],
+          getFixtureMarketIds: () =>
+            new Map([[actors.regionId, liveMarketId(boundedWorld, actors.regionId)]]),
+          collectTelemetry: true,
+          taxPolicy: fixtureTaxPolicy,
+        }),
+      );
+
+    const forward = run([sellerA, sellerB]);
+    const reversed = run([sellerB, sellerA]);
+
+    expect(forward.reconciliationErrors).toBeNull();
+    expect(reversed.reconciliationErrors).toBeNull();
+    expect(reversed.context.marketAllocations).toEqual(forward.context.marketAllocations);
+    expect(reversed.context.marketTelemetry).toEqual(forward.context.marketTelemetry);
+    expect(Array.from(reversed.context.marketClearingAggregates.entries())).toEqual(
+      Array.from(forward.context.marketClearingAggregates.entries()),
+    );
+
+    const totalAllocated = forward.context.marketAllocations.reduce(
+      (sum, allocation) => sum + allocation.quantity,
+      0,
+    );
+    expect(totalAllocated).toBeCloseTo(5, 10);
+    const aggregate = Array.from(forward.context.marketClearingAggregates.values())[0]!;
+    expect(aggregate.offeredQuantity).toBeCloseTo(5, 10);
+
+    const bySeller = new Map<string, number>();
+    for (const allocation of forward.context.marketAllocations) {
+      bySeller.set(
+        allocation.sellerIntentId,
+        (bySeller.get(allocation.sellerIntentId) ?? 0) + allocation.quantity,
+      );
+    }
+    expect(bySeller.get(sellerA.id)).toBeCloseTo(4, 10);
+    expect(bySeller.get(sellerB.id)).toBeCloseTo(1, 10);
+  });
+
   it("keeps allocation identity and emitted group order stable when cross-good intent insertion is reversed", () => {
     const world = buildWorld();
     const actors = counterparties(world);

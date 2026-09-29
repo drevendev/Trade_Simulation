@@ -14,14 +14,20 @@
  */
 
 import type { MarketId, GoodId, RegionId, StateId } from "../domain/id";
+import { actorRefKey } from "../domain/genesisLedger";
 import { stableOrderBy } from "../domain/ordering";
 import type { WorldState } from "./worldState";
 import type { TickContext, PhaseHandler } from "./tickOrchestrator";
 import type { PendingTransitions } from "./worldState";
 import type { MarketIntent } from "./marketIntent";
 import { LocalMarketTelemetryBuilder } from "./marketTelemetry";
-import { computeLocalClearing, type LocalClearingInput } from "./marketClearing";
+import {
+  computeLocalClearing,
+  computeSellableQuantity,
+  type LocalClearingInput,
+} from "./marketClearing";
 import type { TaxPolicyProvider } from "./marketSettlement";
+import { readMarketActorInventory } from "./marketSettlementTransition";
 import { marketPriceKey } from "./phase6MarketPriceFormation";
 
 /**
@@ -270,6 +276,38 @@ export const createPhase8Handler = (options?: {
       // uncollected part and break MTFX-I2, which `preflightMarketSettlement` checks.
       const grossPriceFactor = 1 + assessedTaxRate * collectionEfficiency;
 
+      // Section 7 sellable authority comes from live actor stock, not requested quantity.
+      // Multiple SELL intents that name the same physical actor/good/bucket share one
+      // commitment balance. Evaluate them in stable actor+intent order so insertion order
+      // cannot decide which duplicate intent consumes the scarce stock first.
+      const orderedSellers = stableOrderBy(
+        group.sellers,
+        (intent) => `${actorRefKey(intent.actor)}|${intent.id}`,
+      );
+      const sellerCommitments = new Map<string, number>();
+      const sellableByIntent = new Map<string, number>();
+      for (const seller of orderedSellers) {
+        const inventoryBucket = seller.inventoryBucket ?? "GENERAL";
+        const inventory = readMarketActorInventory(
+          world,
+          seller.actor,
+          inventoryBucket,
+          "seller",
+        );
+        const ownedQuantity = inventory.get(group.goodId as GoodId) ?? 0;
+        const commitmentKey =
+          `${actorRefKey(seller.actor)}|${inventoryBucket}|${group.goodId}`;
+        const alreadyCommitted = sellerCommitments.get(commitmentKey) ?? 0;
+        const sellable = computeSellableQuantity(
+          seller,
+          ownedQuantity,
+          seller.minimumReserveQuantity ?? 0,
+          alreadyCommitted,
+        );
+        sellerCommitments.set(commitmentKey, alreadyCommitted + sellable);
+        sellableByIntent.set(seller.id, sellable);
+      }
+
       // Create clearing input with production computations
       const clearingInput: LocalClearingInput = {
         marketId: group.marketId,
@@ -278,7 +316,7 @@ export const createPhase8Handler = (options?: {
         pass: "MAIN",
         marketCurrencyId,
         buyerIntents: group.buyers,
-        sellerIntents: group.sellers,
+        sellerIntents: orderedSellers,
         computeEffectiveDemand: (intent, grossPrice) => {
           if (intent.side !== "BUY") return 0;
           // Effective demand: min of desired quantity and maxSpend / grossPrice
@@ -290,8 +328,11 @@ export const createPhase8Handler = (options?: {
         },
         computeSellableQuantity: (intent) => {
           if (intent.side !== "SELL") return 0;
-          // For M3 fixtures, assume all desired quantity is available
-          return intent.desiredQuantity;
+          const sellable = sellableByIntent.get(intent.id);
+          if (sellable === undefined) {
+            throw new Error(`Phase-8 SELL intent ${intent.id} has no sellable-stock evidence`);
+          }
+          return sellable;
         },
         computeGrossUnitPrice: (_intent, sellerNetPrice) => {
           // Apply collected consumption tax to get the household gross price
@@ -322,7 +363,10 @@ export const createPhase8Handler = (options?: {
       // because the authoritative post-tick MarketExpectationState transition
       // (Handoff/04 section 9) must not depend on the non-authoritative telemetry
       // toggle (REQ-MARKET-005).
-      const totalSellerOffered = group.sellers.reduce((sum, i) => sum + i.desiredQuantity, 0);
+      const totalSellerOffered = Array.from(sellableByIntent.values()).reduce(
+        (sum, sellable) => sum + sellable,
+        0,
+      );
       const grossPrice = marketPrice * grossPriceFactor;
       let totalBuyerEffective = 0;
       for (const buyer of group.buyers) {
