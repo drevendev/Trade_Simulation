@@ -30,6 +30,14 @@ market implementation adds:
 - Atomic market settlement with tax-aware money and goods transfers
 - Canonical M3 local-market telemetry for diagnostics (shortage/surplus rates, cleared/traded quantities, collection efficiency)
 
+**Milestone 4:** Implementation-complete when this pull request lands. The canonical one-region
+closed economy now composes production, labor allocation and payroll, household consumption,
+finite extraction, real-goods capital formation and ProductionUnit lifecycle through the
+authoritative sixteen-phase TypeScript orchestrator. Its 240-tick deterministic acceptance gate
+binds household MAIN settlement to authoritative post-wage wallet/inventory mutation, and the
+M4 representation requirement is recorded in the implementation ledger. Release tagging remains
+mechanical and follows only after the merged requirement row receives its merge provenance.
+
 **Interactive viewer:** [Open the M3 LocalMarket Pages experience](https://drevendev.github.io/trade_simulation/) — price and traded-quantity trends, the selected-tick market balance and settlement split, and headline metrics from the deterministic golden run, with the M0–M2 previews and the legacy run viewer under the history disclosure.
 
 ## Understanding M3 local markets
@@ -112,6 +120,10 @@ is generated from that file and is presentation only. The summary below follows 
 - M3 representation: the consolidated LocalMarket Pages experience (REQ-VISUALIZATION-006), the
   README and public project text (REQ-VISUALIZATION-007), and the two public explainer articles
   (REQ-VISUALIZATION-008)
+- M4 closed-economy stack: M4 configuration (REQ-CONFIG-006..007), production/labor/capital
+  integration (REQ-PRODUCTION-001..008), household/population behavior
+  (REQ-POPULATION-001..003), the integrated 240-tick gate (REQ-ACCEPTANCE-005), and the M4
+  milestone representation (REQ-VISUALIZATION-009)
 
 **Closed:**
 - Milestone 3. A milestone is released only once every one of its ledger rows reads IMPLEMENTED
@@ -119,9 +131,11 @@ is generated from that file and is presentation only. The summary below follows 
   mechanically from the ledger rather than by hand. All nine M3 rows met it, and the tagger cut
   `v0.3.0 — M3` on that evidence. A row whose merge commit is blank is one a pull request is
   still carrying: `scripts/backfill_merge_commits.py` records it once that pull request lands.
+- Milestone 4 is implementation-complete when this pull request lands: every M4 registry row then
+  reads IMPLEMENTED. Its release remains pending until the machine records the merge provenance
+  for the final REQ-ACCEPTANCE-005 row and `release-tag.yml` evaluates the completed ledger.
 
-**Not implemented yet (later milestones M4–M8):**
-- Production, labor allocation, household consumption and population cohorts in a one-region closed economy (M4)
+**Not implemented yet (later milestones M5–M8):**
 - Inter-regional transport, trade logistics and FX (M5)
 - Fiscal policy, governance, clans and debt (M6)
 - Monetary policy and currency dynamics (M7)
