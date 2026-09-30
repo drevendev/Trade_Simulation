@@ -284,6 +284,18 @@ export const createPhase8Handler = (options?: {
         group.sellers,
         (intent) => `${actorRefKey(intent.actor)}|${intent.id}`,
       );
+      const sellerEndpointKey = (seller: MarketIntent): string =>
+        `${actorRefKey(seller.actor)}|${seller.inventoryBucket ?? "GENERAL"}|${group.goodId}`;
+      // A reserve protects physical inventory, not one intent. Read every declaration
+      // before consuming capacity so a later stricter reserve cannot arrive too late.
+      const reserveByEndpoint = new Map<string, number>();
+      for (const seller of orderedSellers) {
+        const endpoint = sellerEndpointKey(seller);
+        reserveByEndpoint.set(
+          endpoint,
+          Math.max(reserveByEndpoint.get(endpoint) ?? 0, seller.minimumReserveQuantity ?? 0),
+        );
+      }
       const sellerCommitments = new Map<string, number>();
       const sellableByIntent = new Map<string, number>();
       for (const seller of orderedSellers) {
@@ -295,13 +307,12 @@ export const createPhase8Handler = (options?: {
           "seller",
         );
         const ownedQuantity = inventory.get(group.goodId as GoodId) ?? 0;
-        const commitmentKey =
-          `${actorRefKey(seller.actor)}|${inventoryBucket}|${group.goodId}`;
+        const commitmentKey = sellerEndpointKey(seller);
         const alreadyCommitted = sellerCommitments.get(commitmentKey) ?? 0;
         const sellable = computeSellableQuantity(
           seller,
           ownedQuantity,
-          seller.minimumReserveQuantity ?? 0,
+          reserveByEndpoint.get(commitmentKey) ?? 0,
           alreadyCommitted,
         );
         sellerCommitments.set(commitmentKey, alreadyCommitted + sellable);

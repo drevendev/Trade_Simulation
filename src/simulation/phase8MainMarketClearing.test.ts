@@ -412,10 +412,144 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
     expect(bySeller.get(sellerB.id)).toBeCloseTo(1, 10);
   });
 
-  it("keeps allocation identity and emitted group order stable when cross-good intent insertion is reversed", () => {
+  it.each([
+    { firstReserve: 0, secondReserve: 3, expected: 2 },
+    { firstReserve: 3, secondReserve: 0, expected: 2 },
+    { firstReserve: 1, secondReserve: 1, expected: 4 },
+    { firstReserve: 0, secondReserve: 5, expected: 0 },
+    { firstReserve: 0, secondReserve: 6, expected: 0 },
+  ])("protects the maximum shared reserve ($firstReserve, $secondReserve)", ({
+    firstReserve, secondReserve, expected,
+  }) => {
     const world = buildWorld();
     const actors = counterparties(world);
+    const sellerState = world.productionUnits.get(actors.sellerUnitId)!;
+    const buyerState = world.cohorts.get(actors.buyerCohortId)!;
+    const boundedWorld: WorldState = {
+      ...world,
+      productionUnits: new Map(world.productionUnits).set(actors.sellerUnitId, {
+        ...sellerState,
+        outputInventory: new Map(sellerState.outputInventory).set(FOOD, 5),
+      }),
+      cohorts: new Map(world.cohorts).set(actors.buyerCohortId, {
+        ...buyerState,
+        wallet: new Map(buyerState.wallet).set(actors.currencyId, 1000),
+      }),
+    };
+    const [sellerTemplate, buyer] = buildIntents(actors, 10, 1000);
+    const sellerA: MarketIntent = {
+      ...sellerTemplate!,
+      id: createMarketIntentId("mi:issue-251-reserve-a"),
+      desiredQuantity: 4,
+      minimumReserveQuantity: firstReserve,
+    };
+    const sellerB: MarketIntent = {
+      ...sellerTemplate!,
+      id: createMarketIntentId("mi:issue-251-reserve-b"),
+      desiredQuantity: 4,
+      minimumReserveQuantity: secondReserve,
+    };
+    const run = (sellers: MarketIntent[]) => executeTick(
+      boundedWorld,
+      1,
+      boundedWorld.pendingTransitions,
+      createPhase8Handler({
+        getFixtureIntents: () => [...sellers, buyer!],
+        collectTelemetry: true,
+        taxPolicy: fixtureTaxPolicy,
+      }),
+    );
+    const forward = run([sellerA, sellerB]);
+    const reversed = run([sellerB, sellerA]);
+    expect(forward.reconciliationErrors).toBeNull();
+    expect(reversed.reconciliationErrors).toBeNull();
+    expect(reversed.context.marketAllocations).toEqual(forward.context.marketAllocations);
+    expect(reversed.context.marketTelemetry).toEqual(forward.context.marketTelemetry);
+    expect(Array.from(reversed.context.marketClearingAggregates.entries())).toEqual(
+      Array.from(forward.context.marketClearingAggregates.entries()),
+    );
+    expect(forward.context.marketAllocations.reduce((sum, lot) => sum + lot.quantity, 0))
+      .toBeCloseTo(expected, 10);
+    const aggregates = Array.from(forward.context.marketClearingAggregates.values());
+    expect(aggregates).toHaveLength(1);
+    expect(aggregates[0]!.offeredQuantity).toBeCloseTo(expected, 10);
+    expect(aggregates[0]!.clearedQuantity).toBeCloseTo(expected, 10);
+    expect(forward.context.marketTelemetry[0]!.offeredQuantity).toBeCloseTo(expected, 10);
+
+    // The real settlement must preserve the reserved stock, not just report a cap.
+    const settled = applyMarketSettlementTransition(boundedWorld, forward.context);
+    expect(settled.productionUnits.get(actors.sellerUnitId)!.outputInventory.get(FOOD))
+      .toBeCloseTo(5 - expected, 10);
+    expect(boundedWorld.productionUnits.get(actors.sellerUnitId)!.outputInventory.get(FOOD))
+      .toBe(5);
+  });
+
+  it.each(["INPUT" as const, "INVESTMENT" as const])(
+    "does not apply an OUTPUT reserve to a distinct %s inventory",
+    (otherBucket) => {
+      const world = buildWorld();
+      const actors = counterparties(world);
+      const sellerState = world.productionUnits.get(actors.sellerUnitId)!;
+      const boundedWorld: WorldState = {
+        ...world,
+        productionUnits: new Map(world.productionUnits).set(actors.sellerUnitId, {
+          ...sellerState,
+          outputInventory: new Map(sellerState.outputInventory).set(FOOD, 5),
+          inputInventory: new Map(sellerState.inputInventory).set(FOOD, 4),
+          investmentInventory: new Map(sellerState.investmentInventory).set(FOOD, 4),
+        }),
+      };
+      const [sellerTemplate, buyer] = buildIntents(actors, 10, 1000);
+      const outputSeller: MarketIntent = {
+        ...sellerTemplate!,
+        id: createMarketIntentId("mi:issue-251-bucket-output"),
+        desiredQuantity: 4,
+        minimumReserveQuantity: 3,
+      };
+      const otherSeller: MarketIntent = {
+        ...sellerTemplate!,
+        id: createMarketIntentId("mi:issue-251-bucket-other"),
+        inventoryBucket: otherBucket,
+        desiredQuantity: 4,
+        minimumReserveQuantity: 0,
+      };
+      const result = executeTick(
+        boundedWorld,
+        1,
+        boundedWorld.pendingTransitions,
+        createPhase8Handler({
+          getFixtureIntents: () => [otherSeller, buyer!, outputSeller],
+          collectTelemetry: true,
+          taxPolicy: fixtureTaxPolicy,
+        }),
+      );
+      expect(result.reconciliationErrors).toBeNull();
+      expect(result.context.marketAllocations).toHaveLength(2);
+      const quantityFor = (id: string) => result.context.marketAllocations
+        .filter((lot) => lot.sellerIntentId === id)
+        .reduce((sum, lot) => sum + lot.quantity, 0);
+      expect(quantityFor(outputSeller.id)).toBeCloseTo(2, 10);
+      expect(quantityFor(otherSeller.id)).toBeCloseTo(4, 10);
+      const aggregates = Array.from(result.context.marketClearingAggregates.values());
+      expect(aggregates).toHaveLength(1);
+      expect(aggregates[0]!.offeredQuantity).toBeCloseTo(6, 10);
+      expect(aggregates[0]!.clearedQuantity).toBeCloseTo(6, 10);
+    },
+  );
+
+  it("keeps allocation identity and emitted group order stable when cross-good intent insertion is reversed", () => {
+    const initialWorld = buildWorld();
+    const actors = counterparties(initialWorld);
     const TOOLS = "good:tools" as GoodId;
+    const seller = initialWorld.productionUnits.get(actors.sellerUnitId)!;
+    // Both groups must have actual stock: a food producer does not own tools by default.
+    const world: WorldState = {
+      ...initialWorld,
+      productionUnits: new Map(initialWorld.productionUnits).set(actors.sellerUnitId, {
+        ...seller,
+        outputInventory: new Map(seller.outputInventory).set(FOOD, 2).set(TOOLS, 2),
+      }),
+    };
 
     const intents: MarketIntent[] = [
       {
