@@ -10,11 +10,18 @@ name: Release tag
 # carries the same digest is not re-cut. A push that changed no coverage does nothing.
 
 on:
+  # Every push to `master`, not only one that touches the ledger or the registry
+  # (#778). The provenance proposal this workflow opens is recomputed from `master` on
+  # every run, and a run is the only thing that can repair one left behind: a push that
+  # lands while its checks are still running makes its head stale, auto-merge then waits
+  # on a head that can no longer go green, and neither the branch sweep (`claude/**` and
+  # `zen/**` only) nor a server-side base merge may touch a machine branch — the guard
+  # admits no committer but `github-actions[bot]` there. #777 sat behind four merges
+  # that way on 2026-09-30 until a dispatch recomputed it. A push that changes nothing
+  # here costs one idle run: the backfill finds nothing to fill and the tagger cuts
+  # nothing whose coverage it has already tagged.
   push:
     branches: [master]
-    paths:
-      - 'docs/spec/implementation_status.csv'
-      - 'docs/spec/mirror/REQUIREMENTS_REGISTRY.csv'
   workflow_dispatch:
 
 permissions: {}

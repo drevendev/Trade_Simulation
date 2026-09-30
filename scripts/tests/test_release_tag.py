@@ -229,5 +229,54 @@ class TheRegistrysOwnColumnTests(unittest.TestCase):
         )
 
 
+WORKFLOW = ROOT / ".github" / "workflows" / "release-tag.yml"
+
+
+def trigger_problems(text):
+    """Why the workflow's `on:` block would let a provenance proposal go stale. Pure.
+
+    Text rather than a YAML parse, like the other workflow tests: this runs in the
+    policy-guard job with nothing but the standard library.
+    """
+    block = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    triggers = [line for line in block.splitlines() if line and not line.lstrip().startswith("#")]
+    problems = []
+    if "  push:" not in triggers or "    branches: [master]" not in triggers:
+        problems.append("the workflow no longer runs on a push to master")
+    if any(line.strip().startswith(("paths:", "paths-ignore:")) for line in triggers):
+        problems.append(
+            "the push trigger is filtered by path, so a push that leaves the ledger alone "
+            "strands an open provenance proposal behind master (#778)"
+        )
+    if "  workflow_dispatch:" not in triggers:
+        problems.append("the workflow can no longer be dispatched by hand")
+    return problems
+
+
+class ProducerFollowsMasterTests(unittest.TestCase):
+    """The provenance proposal is recomputed whenever `master` moves (#778).
+
+    #777 was opened after #661 merged, went stale when #772 merged while its checks
+    were still running, and waited on a head that could no longer go green: the only
+    trigger was a push touching the ledger or the registry, and nothing else may
+    repair a machine branch.
+    """
+
+    def test_the_shipped_workflow_runs_on_every_push_to_master(self):
+        self.assertEqual(trigger_problems(WORKFLOW.read_text(encoding="utf-8")), [])
+
+    def test_a_path_filter_on_the_push_trigger_is_caught(self):
+        edited = WORKFLOW.read_text(encoding="utf-8").replace(
+            "    branches: [master]\n",
+            "    branches: [master]\n    paths:\n      - 'docs/spec/implementation_status.csv'\n",
+            1,
+        )
+        self.assertIn("filtered by path", " ".join(trigger_problems(edited)))
+
+    def test_losing_the_dispatch_is_caught(self):
+        edited = WORKFLOW.read_text(encoding="utf-8").replace("  workflow_dispatch:\n", "", 1)
+        self.assertIn("dispatched by hand", " ".join(trigger_problems(edited)))
+
+
 if __name__ == "__main__":
     unittest.main()
