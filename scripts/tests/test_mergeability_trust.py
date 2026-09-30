@@ -20,6 +20,14 @@ These assertions are what keeps the boundary from eroding one edit at a time: a
 a branch, a branch filter dropped from `push`. Each would pass review as a small change
 and each reopens the hole, so each is refused here by name.
 
+#769 put one credential that can push on the pull request event itself: a branch born
+behind `master` gets its base merge in its own run instead of waiting for `master` to
+move. That credential is held to the event's pull request by where its token goes, not
+only by where it is minted. A token reaches only steps that run under the same condition
+as its mint, and the pull request event's token reaches only a single-pull-request step.
+Handing it to the fan-out, to a step on the same event that is not confined to one pull
+request, or minting it for every event, is each refused here like the rest.
+
 Text assertions rather than a YAML parse, like the other workflow tests: this must run
 in the policy-guard job with nothing but the standard library. The checks are functions
 of the text, and the synthetic cases below prove they fire on the text that would
@@ -41,10 +49,13 @@ NOT_A_PULL_REQUEST = "github.event_name != 'pull_request_target'"
 A_PULL_REQUEST = "github.event_name == 'pull_request_target'"
 
 # Every step that carries authority beyond the event's own pull request: the status
-# fan-out, and the three that hold a credential able to push. Each must run from
-# `master` only, and never on a pull request event, whose `github.ref` is `master` too.
+# fan-out, and the three that hold a credential able to push over every open pull
+# request. Each must run from `master` only, and never on a pull request event, whose
+# `github.ref` is `master` too. The one exception is a mint on the pull request event
+# alone, whose token reaches nothing but a single-pull-request step (#769).
 PRIVILEGED = ("mergeability.py", "create-github-app-token", "update_branches.py",
               "resolve_ledger_conflicts.py")
+MINT = "create-github-app-token"
 
 
 def text():
@@ -70,6 +81,16 @@ def steps(body):
 def condition(step):
     match = re.search(r"^\s+if:\s*(.+?)\s*$", step, re.MULTILINE)
     return match.group(1) if match else ""
+
+
+def step_id(step):
+    match = re.search(r"^\s+id:\s*([\w-]+)\s*$", step, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def tokens_read(step):
+    """The ids of the steps whose minted token this step reads. Pure."""
+    return set(re.findall(r"steps\.([\w-]+)\.outputs\.token\b", step))
 
 
 def violations(body):
@@ -107,19 +128,35 @@ def violations(body):
             found.append("the checkout names a `ref:`; the base branch, which is the "
                          "default, is the only revision that may run here")
 
+    minted = {step_id(s): condition(s) for s in all_steps if MINT in s}
     for step in all_steps:
-        privileged = any(marker in step for marker in PRIVILEGED) and ONE_PULL not in step
+        guard = condition(step)
+        # Minted on the pull request event and nothing else. Its authority is whatever
+        # reads its token, and that is held in the loop over readers below.
+        own_pull_mint = MINT in step and guard == A_PULL_REQUEST
+        privileged = (any(marker in step for marker in PRIVILEGED)
+                      and ONE_PULL not in step and not own_pull_mint)
         if privileged:
-            guard = condition(step)
             if MASTER_ONLY not in guard or NOT_A_PULL_REQUEST not in guard:
                 found.append(f"a privileged step is not confined to `master` pushes and "
                              f"dispatches: `if: {guard or '<none>'}`")
         if ONE_PULL in step:
-            if condition(step) != A_PULL_REQUEST:
+            if guard != A_PULL_REQUEST:
                 found.append("the single-pull-request step must run on "
                              "`pull_request_target` and nothing else")
             if FAN_OUT in step:
                 found.append("the single-pull-request step fans out")
+        for name in sorted(tokens_read(step)):
+            if name not in minted:
+                continue
+            if minted[name] != guard:
+                found.append(f"a step under `if: {guard or '<none>'}` reads the token "
+                             f"`{name}` minted under `if: {minted[name] or '<none>'}`; a "
+                             f"credential reaches only the steps of the event it was "
+                             f"minted for")
+            elif minted[name] == A_PULL_REQUEST and ONE_PULL not in step:
+                found.append(f"the token `{name}`, minted on a pull request event, reaches "
+                             f"a step that is not confined to that pull request")
 
     return found
 
@@ -134,8 +171,25 @@ class BoundaryHoldsTests(unittest.TestCase):
         body = text()
         found = steps(body)
         self.assertEqual(sum(1 for s in found if FAN_OUT in s and "mergeability.py" in s), 1)
-        self.assertEqual(sum(1 for s in found if ONE_PULL in s), 1)
-        self.assertEqual(sum(1 for s in found if "create-github-app-token" in s), 1)
+        # Two steps act for the event's own pull request: its status, and the update of a
+        # branch born behind (#769).
+        self.assertEqual(sum(1 for s in found if ONE_PULL in s and "mergeability.py" in s), 1)
+        self.assertEqual(sum(1 for s in found if ONE_PULL in s and "update_branches.py" in s), 1)
+        self.assertEqual(sum(1 for s in found if ONE_PULL in s), 2)
+        # One credential per kind of event, each read by the steps of that event alone.
+        self.assertEqual(
+            sorted(condition(s) for s in found if MINT in s),
+            sorted([A_PULL_REQUEST, f"{NOT_A_PULL_REQUEST} && {MASTER_ONLY}"]),
+        )
+        readers = {}
+        for s in found:
+            for name in tokens_read(s):
+                readers.setdefault(name, []).append(ONE_PULL in s)
+        own_pull = next(step_id(s) for s in found if MINT in s and condition(s) == A_PULL_REQUEST)
+        # The pull request's credential: read once, by a single-pull-request step.
+        self.assertEqual(readers.pop(own_pull), [True])
+        # `master`'s: read by the sweep and the resolver, neither confined to one.
+        self.assertEqual(list(readers.values()), [[False, False]])
         self.assertGreaterEqual(sum(1 for s in found if "--all-open" in s), 3)
         self.assertEqual(set(triggers(body)), {"pull_request_target", "push", "workflow_dispatch"})
 
@@ -205,6 +259,58 @@ class BoundaryErodesTests(unittest.TestCase):
             '--pull "${PR_NUMBER}"', '--pull "${PR_NUMBER}" --all-open'
         )
         self.assert_refused(edited, "the single-pull-request step fans out")
+
+    def test_the_pull_request_update_turned_into_a_sweep_is_refused(self):
+        # #769's step holds a credential that can push; over every open pull request it
+        # would be the fan-out, run on a pull request event.
+        edited = self.body.replace(
+            'update_branches.py --repo "${REPOSITORY}" --pull "${PR_NUMBER}"',
+            'update_branches.py --repo "${REPOSITORY}" --all-open',
+        )
+        self.assertNotEqual(edited, self.body, "the fixture edit must apply")
+        self.assert_refused(edited, "a privileged step is not confined")
+        self.assert_refused(edited, "reaches a step that is not confined to that pull request")
+
+    def test_the_pull_request_credential_minted_for_every_event_is_refused(self):
+        edited = self.body.replace(
+            f"        id: pull_identity\n        if: {A_PULL_REQUEST}\n",
+            "        id: pull_identity\n",
+        )
+        self.assertNotEqual(edited, self.body, "the fixture edit must apply")
+        self.assert_refused(edited, "a privileged step is not confined")
+        self.assert_refused(edited, "reaches only the steps of the event it was minted for")
+
+    def test_the_pull_request_credential_handed_to_the_fan_out_is_refused(self):
+        edited = self.body.replace(
+            "GH_TOKEN: ${{ steps.identity.outputs.token }}",
+            "GH_TOKEN: ${{ steps.pull_identity.outputs.token }}",
+        )
+        self.assertNotEqual(edited, self.body, "the fixture edit must apply")
+        self.assert_refused(edited, f"minted under `if: {A_PULL_REQUEST}`")
+
+    def test_the_pull_request_credential_in_a_step_not_confined_to_it_is_refused(self):
+        # Same event, same condition, and no fan-out: still not the step the credential
+        # was minted for. Anything but the single-pull-request update is refused.
+        edited = self.body.replace(
+            "      - name: Update this pull request if it is merely behind\n",
+            "      - name: Look at the branch\n"
+            f"        if: {A_PULL_REQUEST}\n"
+            "        env:\n"
+            "          GH_TOKEN: ${{ steps.pull_identity.outputs.token }}\n"
+            "        run: gh pr view \"${PR_NUMBER}\"\n"
+            "\n"
+            "      - name: Update this pull request if it is merely behind\n",
+        )
+        self.assertNotEqual(edited, self.body, "the fixture edit must apply")
+        self.assert_refused(edited, "reaches a step that is not confined to that pull request")
+
+    def test_master_s_credential_read_on_a_pull_request_event_is_refused(self):
+        edited = self.body.replace(
+            "GH_TOKEN: ${{ steps.pull_identity.outputs.token }}",
+            "GH_TOKEN: ${{ steps.identity.outputs.token }}",
+        )
+        self.assertNotEqual(edited, self.body, "the fixture edit must apply")
+        self.assert_refused(edited, "reads the token `identity`")
 
     def test_a_widened_grant_is_refused(self):
         edited = self.body.replace("  contents: read\n", "  contents: write\n")

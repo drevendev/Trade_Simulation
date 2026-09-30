@@ -1,6 +1,10 @@
 """Negative controls: the sweep touches exactly the branches it may, and no other."""
 
+import contextlib
+import io
+import json
 import pathlib
+import subprocess
 import sys
 import unittest
 
@@ -12,6 +16,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "mergeability.yml"
 
 REPO = "drevendev/trade_simulation"
+
+# The two callers of this script in mergeability.yml, and the credential each holds.
+SWEEP = "Update loop branches that are merely behind"
+SWEEP_IDENTITY = "Act as the MACHINE identity"
+ONE_PULL = "Update this pull request if it is merely behind"
+ONE_PULL_IDENTITY = "Act as the MACHINE identity for this pull request"
 
 
 def pull(ref="claude/issue-9-example", head_repo=REPO, mergeable=True, state="clean", draft=False, pr_state="open"):
@@ -183,31 +193,161 @@ class FailureDetailTests(unittest.TestCase):
         self.assertEqual(ub.failure_detail("", 7), "gh exit 7")
 
 
+class SinglePullRequestTests(unittest.TestCase):
+    """`--pull`, as the pull request event runs it (#769): that pull request, never the list.
+
+    The forge is faked at `_gh`, the one place this script talks to it, so what is
+    asserted is every request the run would have made.
+    """
+
+    def run_main(self, pull_object, behind_by):
+        calls = []
+
+        def gh(args):
+            calls.append(args)
+            if args == ["api", f"repos/{REPO}/pulls/7"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps(pull_object), "")
+            if "PUT" in args:
+                return subprocess.CompletedProcess(args, 0, "{}", "")
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 404: not a request this run makes")
+
+        saved = (ub._gh, ub.mergeability.compare_to_base, sys.argv)
+        ub._gh = gh
+        ub.mergeability.compare_to_base = lambda *a: ub.mergeability.Comparison(behind_by, "tip")
+        sys.argv = ["update_branches.py", "--repo", REPO, "--pull", "7"]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                code = ub.main()
+        finally:
+            ub._gh, ub.mergeability.compare_to_base, sys.argv = saved
+        return code, calls, out.getvalue()
+
+    def test_a_branch_born_behind_gets_the_base_merge_pinned_to_the_head_it_read(self):
+        code, calls, out = self.run_main(pull(), 1)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [
+            ["api", f"repos/{REPO}/pulls/7"],
+            ["api", "-X", "PUT", f"repos/{REPO}/pulls/7/update-branch", "-f", "expected_head_sha=abc"],
+        ])
+        self.assertIn("#7 claude/issue-9-example updated", out)
+
+    def test_a_branch_that_contains_its_base_is_read_and_left_alone(self):
+        # Also the run the MACHINE's own push starts: it measures zero and stops there.
+        code, calls, out = self.run_main(pull(), 0)
+        self.assertEqual((code, calls), (0, [["api", f"repos/{REPO}/pulls/7"]]))
+        self.assertIn("already contains", out)
+
+    def test_branches_outside_the_maintained_classes_are_read_and_left_alone(self):
+        for case in (pull(ref="policy/769-update-a-branch-born-behind"), pull(ref="spec-mirror"),
+                     pull(ref="ledger-provenance"), pull(head_repo="someone/trade_simulation")):
+            with self.subTest(ref=case["head"]["ref"], head_repo=case["head"]["repo"]["full_name"]):
+                code, calls, _ = self.run_main(case, 3)
+                self.assertEqual((code, calls), (0, [["api", f"repos/{REPO}/pulls/7"]]))
+
+    def test_one_pull_request_never_lists_the_others(self):
+        _, calls, _ = self.run_main(pull(), 2)
+        self.assertFalse([c for c in calls if any("state=open" in part for part in c)])
+        self.assertTrue(all(f"repos/{REPO}/pulls/7" in " ".join(c) for c in calls))
+
+
+def step(body, name):
+    """The step named `name`: its `- name:` line and the lines indented under it. Pure.
+
+    Found by name rather than by the first mention of the script, because there are two
+    callers now and the first mention is no longer the sweep. A comment at step
+    indentation ends the step, so the next step's comment is never read as this one's.
+    """
+    lines = body.splitlines(keepends=True)
+    start = lines.index(f"      - name: {name}\n")
+    end = start + 1
+    while end < len(lines) and (not lines[end].strip() or lines[end].startswith("        ")):
+        end += 1
+    return "".join(lines[start:end])
+
+
 class WorkflowTests(unittest.TestCase):
     def text(self):
         return WORKFLOW.read_text(encoding="utf-8")
 
     def test_the_sweep_runs_after_the_fan_out_and_from_master_only(self):
         text = self.text()
-        sweep = text.index("scripts/update_branches.py")
-        fan_out = text.index("scripts/mergeability.py --repo")
-        self.assertGreater(sweep, fan_out, "statuses must be written before branches are updated")
-        step = text[text.rfind("- name:", 0, sweep):sweep]
-        self.assertIn("refs/heads/master", step)
+        sweep = step(text, SWEEP)
+        fan_out = text.index('scripts/mergeability.py --repo "${{ github.repository }}" --all-open')
+        self.assertGreater(text.index(sweep), fan_out, "statuses must be written before branches are updated")
+        self.assertIn("refs/heads/master", sweep)
         # A pull request event's `github.ref` is `master` too, so the ref alone is no guard.
-        self.assertIn("github.event_name != 'pull_request_target'", step)
+        self.assertIn("github.event_name != 'pull_request_target'", sweep)
+        self.assertIn("scripts/update_branches.py", sweep)
+        self.assertIn("--all-open", sweep)
 
     def test_the_sweep_acts_as_the_machine_identity_so_the_push_triggers_checks(self):
         text = self.text()
-        sweep = text.index("scripts/update_branches.py")
-        step = text[text.rfind("- name:", 0, sweep):sweep]
-        self.assertIn("GH_TOKEN: ${{ steps.identity.outputs.token }}", step)
+        sweep = step(text, SWEEP)
+        self.assertIn("GH_TOKEN: ${{ steps.identity.outputs.token }}", sweep)
         # The identity is minted right before, under the same master-only condition,
         # from the MACHINE app — a role that runs no model.
-        mint = text[text.rfind("- name: Act as the MACHINE identity", 0, sweep):sweep]
+        mint = step(text, SWEEP_IDENTITY)
+        self.assertLess(text.index(mint), text.index(sweep))
+        self.assertIn("id: identity\n", mint)
         self.assertIn("vars.ZENDEV_MACHINE_APP_CLIENT_ID", mint)
         self.assertIn("refs/heads/master", mint)
         self.assertNotIn("ZENDEV_PAT", text)
+
+    def test_a_pull_request_born_behind_is_updated_on_its_own_event_alone(self):
+        # #769: #767 opened one commit behind `master` and waited fifteen hours for the
+        # sweep. The same script, on the pull request event, for that pull request only.
+        body = step(self.text(), ONE_PULL)
+        self.assertIn("        if: github.event_name == 'pull_request_target'\n", body)
+        self.assertIn('python scripts/update_branches.py --repo "${REPOSITORY}" --pull "${PR_NUMBER}"', body)
+        self.assertNotIn("--all-open", body)
+
+    def test_the_pull_request_s_status_is_written_before_its_branch_moves(self):
+        text = self.text()
+        status = text.index('scripts/mergeability.py --repo "${{ github.repository }}" --pull "${PR_NUMBER}"')
+        self.assertGreater(text.index(step(text, ONE_PULL)), status)
+
+    def test_the_number_and_the_repository_reach_the_shell_through_the_environment(self):
+        body = step(self.text(), ONE_PULL)
+        self.assertIn("          PR_NUMBER: ${{ github.event.pull_request.number }}\n", body)
+        self.assertIn("          REPOSITORY: ${{ github.repository }}\n", body)
+        self.assertNotIn("${{", body[body.index("        run: |"):])
+
+    def test_the_pull_request_update_acts_as_the_machine_identity_minted_for_it(self):
+        text = self.text()
+        body = step(text, ONE_PULL)
+        self.assertIn("GH_TOKEN: ${{ steps.pull_identity.outputs.token }}", body)
+        # Never `github.token`: a push made with it starts no workflows, and the merged
+        # head would never be measured.
+        self.assertNotIn("github.token", body)
+        mint = step(text, ONE_PULL_IDENTITY)
+        self.assertLess(text.index(mint), text.index(body))
+        self.assertIn("id: pull_identity\n", mint)
+        self.assertIn("        if: github.event_name == 'pull_request_target'\n", mint)
+        self.assertIn("uses: actions/create-github-app-token@", mint)
+        for needle in ("client-id: ${{ vars.ZENDEV_MACHINE_APP_CLIENT_ID }}",
+                       "private-key: ${{ secrets.ZENDEV_MACHINE_APP_PRIVATE_KEY }}",
+                       "repositories: ${{ github.event.repository.name }}"):
+            self.assertIn(needle, mint)
+
+    def test_a_failed_mint_warns_and_leaves_the_branch_to_its_author(self):
+        text = self.text()
+        self.assertIn("continue-on-error: true", step(text, ONE_PULL_IDENTITY))
+        body = step(text, ONE_PULL)
+        guard = body.index('if [ -z "${GH_TOKEN}" ]; then')
+        call = body.index("python scripts/update_branches.py")
+        self.assertLess(guard, call)
+        self.assertIn("::warning::", body[guard:call])
+        self.assertIn("exit 0", body[guard:call])
+
+    def test_the_step_locator_reads_one_step_and_no_more(self):
+        # Without this, every assertion above passes on a locator that swallowed the
+        # rest of the file.
+        text = self.text()
+        for name in (SWEEP, SWEEP_IDENTITY, ONE_PULL, ONE_PULL_IDENTITY):
+            with self.subTest(step=name):
+                body = step(text, name)
+                self.assertEqual(body.count("      - name:"), 1)
+                self.assertEqual(sum(1 for line in body.splitlines() if line.startswith("        if:")), 1)
 
 
 if __name__ == "__main__":
