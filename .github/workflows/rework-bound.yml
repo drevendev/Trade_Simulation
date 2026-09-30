@@ -1,0 +1,87 @@
+name: Rework bound
+
+# The rework bound lived in the ACCEPTOR's workflow: scripts/rework_limit.py closed a
+# pull request at its third refusal. scheme/8 runs no ACCEPTOR, so from 2026-09-15
+# nothing counted - #628 took six `## Verdict: REQUEST_CHANGES` on 2026-09-21, the
+# first three inside two hours, and nothing surfaced it until a status session counted
+# by hand (#771).
+#
+# The operator's decision on #771 is to mark, not to close. When the active scheme's
+# `verdict_owner` has refused one pull request `rework_limit` times,
+# scripts/rework_bound.py adds `status:needs-decision` to it and posts one
+# `## Rework bound reached` comment linking the refusals; from there the researcher
+# reviews it as the specification's owner (docs/zendev/ENDLESSZEN_AUTHOR.md). It never
+# closes anything, never removes a label, never touches another pull request, and
+# marks a pull request once.
+#
+# `issue_comment`, so the definition and the script are the default branch's whatever
+# pull request the comment is on: the event runs the default branch's copy of this
+# file, and nothing from the pull request is checked out or executed.
+#
+# No loop. The label and the comment are made with GITHUB_TOKEN, and an event made
+# with GITHUB_TOKEN starts no workflow run, so the mark cannot start this workflow or
+# any other. It could not pass the gate below either: it begins with
+# `## Rework bound reached`, not with a refusal.
+on:
+  issue_comment:
+    types: [created]
+
+# One scope, for scripts/rework_bound.py. It reads the pull request and its formal
+# reviews (Pull requests endpoints), then reads its comments, adds a label to it and
+# comments on it (Issues endpoints, addressed by the pull request's number). GitHub
+# serves the Issues endpoints under either scope and honours the one that matches the
+# object: on a pull request that is `pull-requests`. pr-ledger.yml and head-evidence.yml
+# already rest on it, reading pull requests' comments with `pull-requests: read` and no
+# `issues` scope; the documented example of `pull-requests: write` is adding a label to
+# a pull request. `issues: write` would still need `pull-requests: read` for the two
+# pull-request reads, and would grant writes to every Issue, which this never makes.
+# The checkout needs no `contents: read` on this public repository (issue-status.yml).
+permissions:
+  pull-requests: write
+
+jobs:
+  mark:
+    name: rework-bound
+    # A cost gate, not the rule: the script decides again, from the pull request as it
+    # is. Every comment on any Issue or pull request starts a run of this workflow; only
+    # a comment on a pull request that begins the way a refusal does starts this job.
+    # Who wrote it is not checked here - the verdict owner is the active scheme's, which
+    # this expression cannot read - so a refusal-shaped comment from anyone else costs
+    # one short job and counts for nothing.
+    if: >-
+      github.event.issue.pull_request
+      && startsWith(github.event.comment.body, '## Verdict: REQUEST_CHANGES')
+    # One run per pull request at a time, none cancelled: two refusals close together
+    # must not both mark it. The later run reads the comment the earlier one posted and
+    # stops there.
+    concurrency:
+      group: rework-bound-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No `ref:`. For an `issue_comment` event the checkout is the default branch's
+      # head, the only revision that can define this workflow for that event, so nothing
+      # from the pull request chooses what runs. No credential is left behind: nothing
+      # here pushes.
+      - name: Check out the reviewed definition
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # Everything from the event reaches the script through the environment, never
+      # through expression interpolation into the shell line. The comment itself is not
+      # passed at all: the script reads the pull request's comments from the forge.
+      - name: Mark the pull request at the rework bound
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python scripts/rework_bound.py \
+            --repo "${REPOSITORY}" \
+            --pull "${PR_NUMBER}"

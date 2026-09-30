@@ -130,10 +130,23 @@ body does not name; it is superseded, not a finding.
   the operator needs.
 - **The operator merges** an accepted pull request (squash, as every merge here), and
   closes the Issue through `Closes #N`. Nothing merges by itself.
-- **Nothing closes a pull request by itself either.** The rework bound (three refusals)
-  and the unreachable-pull-request rule (24 idle hours) lived in the ACCEPTOR's workflow
-  and are not enforced under this scheme; a pull request that is going nowhere is closed
-  by a person, and its Issue returned to `status:ready` by hand.
+- **At the rework bound the pull request becomes yours to review.** When the verdict
+  owner has refused one pull request `rework_limit` times (three under scheme/8), the
+  forge adds `status:needs-decision` to it and says so once, in a
+  `## Rework bound reached` comment linking the refusals. From there the operator
+  does not decide it — you do, as the specification's owner, in one
+  `## Researcher review:` comment that names the head and chooses one of:
+  - **CONTINUE** — the open findings are inside the requirement; rework goes on;
+  - **NARROW** — the findings you list are outside this requirement: file each as
+    its own Issue, link them, and the verdict owner judges what remains against the
+    narrowed scope;
+  - **CLOSE** — close the pull request and return its Issue to `status:ready`, with
+    a summary of what the refusals established.
+
+  The verdict stays the verdict owner's: a merge still needs its
+  `## Verdict: ACCEPT` and the four required checks green. Nothing closes a pull
+  request by itself, and the unreachable rule (24 idle hours) is not enforced under
+  this scheme.
 
 ## What is measured
 

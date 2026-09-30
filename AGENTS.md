@@ -73,11 +73,18 @@ naming the exact head it judged. A clean head gets `## Verdict: ACCEPT`; that co
 with the four required checks green on the same head, is what the operator merges on.
 A defect is a `## SLOPSTER QA: FINDING` comment and, when it blocks acceptance, a
 `## Verdict: REQUEST_CHANGES` comment — never a formal review, which would hold the
-merge until its author or an administrator cleared it.
+merge until its author or an administrator cleared it. At the rework bound
+(`rework_limit` in the same descriptor) the forge marks the pull request
+`status:needs-decision` and says so once, in a `## Rework bound reached` comment, and
+the researcher reviews it as the specification's owner: a `## Researcher review: NARROW`
+rules the findings it names outside the pull request's requirement, each filed as its
+own Issue, and the verdict owner judges what remains against that narrowed scope
+([docs/zendev/ENDLESSZEN_AUTHOR.md](docs/zendev/ENDLESSZEN_AUTHOR.md)).
 
-**A base merge moves the head, not the change.** When `master` moves, the forge merges
-it into every loop branch that is merely behind, and the pull request gets a new head
-whose own diff is what it was. The forge says so on the pull request, in a
+**A base merge moves the head, not the change.** When `master` moves, or a pull
+request is opened or pushed already behind it (#769), the forge merges it into every
+loop branch that is merely behind, and the pull request gets a new head whose own diff
+is what it was. The forge says so on the pull request, in a
 `## Head evidence` comment: the head, the four required checks measured on it with
 their links, and the chain of heads back to the one at which the pull request's own
 diff last changed. A handoff or a verdict naming any head of that chain stands for

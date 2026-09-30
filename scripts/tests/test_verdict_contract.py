@@ -23,6 +23,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import head_evidence  # noqa: E402
 import record_pull_request as rpr  # noqa: E402
+import rework_bound  # noqa: E402
 import schemes  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -35,6 +36,8 @@ ACCEPT = "## Verdict: ACCEPT"
 REFUSE = "## Verdict: REQUEST_CHANGES"
 FINDING = "## SLOPSTER QA: FINDING"
 EVIDENCE = "## Head evidence"
+BOUND = "## Rework bound reached"
+REVIEW = "## Researcher review:"
 # The instruction #544 reported, in any of the spellings it could come back in.
 ASKS_FOR_A_FORMAL_REVIEW = re.compile(
     r"formal review\s*[—:-]\s*\*?Approve|\*?Approve\*?\s+or\s+\*?Request changes", re.IGNORECASE
@@ -164,6 +167,64 @@ class CarriedAcrossBaseMergesTests(unittest.TestCase):
         text = flat(GUIDE)
         self.assertIn("Do not merge `master` yourself", text)
         self.assertIn("do not hand off again because the head moved", text)
+
+
+class ReworkBoundTests(unittest.TestCase):
+    """#771: at the rework bound the forge marks the pull request, and the researcher
+    reviews it; the verdict stays where it was.
+
+    Two headings spelled in three places: the script that writes the mark and names the
+    review, the contract, and the guide. Held here the way `## Head evidence` is held,
+    so that none of the three can rename one alone and leave the others describing a
+    comment nothing writes.
+    """
+
+    def test_the_script_spells_the_headings_the_documents_name(self):
+        self.assertEqual(rework_bound.HEADING, BOUND)
+        self.assertEqual(rework_bound.REVIEW_HEADING, REVIEW)
+
+    def test_both_documents_name_both_headings(self):
+        for path in (AGENTS, GUIDE):
+            with self.subTest(document=path.name):
+                text = flat(path)
+                self.assertIn(f"`{BOUND}`", text)
+                # The contract names the review by one of its choices.
+                self.assertIn(f"`{REVIEW}", text)
+
+    def test_both_documents_take_the_bound_from_the_descriptor_and_name_the_label(self):
+        for path in (AGENTS, GUIDE):
+            with self.subTest(document=path.name):
+                text = flat(path)
+                self.assertIn("`rework_limit`", text)
+                self.assertIn(f"`{rework_bound.LABEL}`", text)
+
+    def test_narrow_files_what_it_rules_out_and_leaves_the_rest_to_the_verdict_owner(self):
+        self.assertIn("each filed as its own Issue", flat(AGENTS))
+        self.assertIn("file each as its own Issue", flat(GUIDE))
+        for path in (AGENTS, GUIDE):
+            with self.subTest(document=path.name):
+                self.assertIn("the verdict owner judges what remains against", flat(path))
+
+    def test_the_guide_names_three_choices_and_keeps_the_verdict_with_its_owner(self):
+        text = flat(GUIDE)
+        for choice in ("**CONTINUE**", "**NARROW**", "**CLOSE**"):
+            self.assertIn(choice, text)
+        self.assertIn("The verdict stays the verdict owner's", text)
+        self.assertIn(f"a merge still needs its `{ACCEPT}`", text)
+
+    def test_the_guide_no_longer_says_nothing_enforces_the_bound(self):
+        text = flat(GUIDE)
+        self.assertNotIn("The rework bound (three refusals) and the unreachable-pull-request rule", text)
+        self.assertIn("the unreachable rule (24 idle hours) is not enforced", text)
+
+    def test_the_mark_is_never_a_verdict(self):
+        # Even from the verdict owner's own account, the form is not read as one.
+        scheme = active_scheme()
+        bound = rework_bound.Bound(scheme["id"], scheme["verdict_owner"], scheme["rework_limit"])
+        body = rework_bound.render({"head": {"sha": "a" * 40}}, [], bound)
+        shaped = [{"user": {"login": bound.owner}, "created_at": "2026-09-30T20:00:00Z", "body": body}]
+        self.assertTrue(body.startswith(BOUND))
+        self.assertEqual(rpr.verdicts([], shaped, bound.owner), [])
 
 
 if __name__ == "__main__":

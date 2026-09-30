@@ -67,6 +67,9 @@ STATE_OF = {
 # Two entries this close together with the same state are one verdict seen twice: a
 # formal review and the comment that explains it.
 SAME_VERDICT = dt.timedelta(minutes=3)
+# What the ledger keeps of a verdict. `owner_verdicts` also carries the review or comment
+# each one was read from, under `item`; the record does not.
+RECORDED = ("at", "state", "source")
 
 
 def normalize_login(login) -> str:
@@ -98,15 +101,19 @@ def _login_of(entry) -> str:
     return normalize_login((entry.get("user") or {}).get("login"))
 
 
-def verdicts(reviews, comments, owner):
+def owner_verdicts(reviews, comments, owner):
     """The verdict owner's verdicts in time order, reviews and verdict comments merged
-    and de-duplicated. Pure.
+    and de-duplicated, each with the review or comment it was read from. Pure.
 
     A formal review and a verdict comment are two ways the same identity says the same
     thing, and on some pull requests it says it both ways for one head. Both are read;
     the second of two identical states inside `SAME_VERDICT` is dropped. Anyone else's
     review — the researcher's, an operator's — is evidence, not a verdict, exactly as the
     loop treats it.
+
+    This is the one reading of a verdict. The ledger records what it returns
+    (`verdicts`), and the rework bound counts and links its refusals
+    (`rework_bound.py`); two readings would put two refusal counts on one pull request.
     """
     owner = normalize_login(owner)
     found = []
@@ -114,7 +121,12 @@ def verdicts(reviews, comments, owner):
         state = (review.get("state") or "").upper()
         if state not in ("APPROVED", "CHANGES_REQUESTED") or _login_of(review) != owner:
             continue
-        found.append({"at": review.get("submitted_at"), "state": state, "source": "review"})
+        found.append({
+            "at": review.get("submitted_at"),
+            "state": state,
+            "source": "review",
+            "item": review,
+        })
     for comment in comments or []:
         if _login_of(comment) != owner:
             continue
@@ -125,6 +137,7 @@ def verdicts(reviews, comments, owner):
             "at": comment.get("created_at"),
             "state": STATE_OF[match.group(1).upper()],
             "source": "comment",
+            "item": comment,
         })
     floor = dt.datetime.min.replace(tzinfo=dt.timezone.utc)
     found.sort(key=lambda entry: parse_time(entry["at"]) or floor)
@@ -136,6 +149,12 @@ def verdicts(reviews, comments, owner):
                 continue
         kept.append(entry)
     return kept
+
+
+def verdicts(reviews, comments, owner):
+    """The verdict owner's verdicts as the ledger records them: when, which state, and
+    through which channel. Pure."""
+    return [{key: entry[key] for key in RECORDED} for entry in owner_verdicts(reviews, comments, owner)]
 
 
 def closed_reason(pull, comments):
