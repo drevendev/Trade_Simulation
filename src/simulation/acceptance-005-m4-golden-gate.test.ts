@@ -5,8 +5,12 @@ import { baselineDefinitionPack } from "../config/fixtures/baselineDefinitionPac
 import { baselineScenario } from "../config/fixtures/baselineScenario";
 import type { NeedCategoryDefinition } from "../config/definitionPack";
 import { createDefaultSimulationConfig } from "../config/simulationConfig";
-import type { GoodId } from "../domain/id";
+import { actorRefKey, type ActorRef } from "../domain/genesisLedger";
+import type { CurrencyId, GoodId } from "../domain/id";
+import type { MarketAllocation } from "./marketClearing";
 import { executeM4ClosedEconomyTick, type M4ClosedEconomyOptions } from "./m4ClosedEconomyOrchestrator";
+import { readActorWallet } from "./marketSettlementTransition";
+import type { TickContext } from "./tickOrchestrator";
 import { buildInitialWorld, type WorldState } from "./worldState";
 
 const GOLDEN_TICKS = 240;
@@ -260,6 +264,208 @@ function normalizedWorldHash(world: WorldState): string {
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
+type InventoryBucket = MarketAllocation["buyerInventoryBucket"];
+
+interface Phase8SettlementFrame {
+  readonly postPhase5World: WorldState;
+  readonly prePhase8World: WorldState;
+  readonly postPhase8World: WorldState;
+  readonly context: TickContext;
+}
+
+interface MoneyExpectation {
+  readonly actor: ActorRef;
+  readonly currencyId: CurrencyId;
+  readonly delta: number;
+}
+
+interface GoodsExpectation {
+  readonly actor: ActorRef;
+  readonly bucket: InventoryBucket;
+  readonly goodId: GoodId;
+  readonly delta: number;
+}
+
+function readActorInventory(
+  world: WorldState,
+  actor: ActorRef,
+  bucket: InventoryBucket,
+  goodId: GoodId,
+): number {
+  switch (actor.type) {
+    case "COHORT": {
+      if (bucket !== "GENERAL") throw new Error(`Cohort ${String(actor.cohortId)} must settle through GENERAL inventory`);
+      return world.cohorts.get(actor.cohortId)?.householdInventory.get(goodId) ?? 0;
+    }
+    case "STATE": {
+      if (bucket !== "GENERAL") throw new Error(`State ${String(actor.stateId)} must settle through GENERAL inventory`);
+      return world.states.get(actor.stateId)?.publicInventory.get(goodId) ?? 0;
+    }
+    case "PRODUCTION_UNIT": {
+      const unit = world.productionUnits.get(actor.productionUnitId);
+      if (unit === undefined) throw new Error(`Missing ProductionUnit ${String(actor.productionUnitId)}`);
+      if (bucket === "INPUT") return unit.inputInventory.get(goodId) ?? 0;
+      if (bucket === "OUTPUT") return unit.outputInventory.get(goodId) ?? 0;
+      if (bucket === "INVESTMENT") return unit.investmentInventory.get(goodId) ?? 0;
+      throw new Error(`ProductionUnit ${String(actor.productionUnitId)} cannot settle through GENERAL inventory`);
+    }
+    case "CLAN":
+      throw new Error(`Clan ${String(actor.clanId)} has no authoritative physical inventory`);
+    case "MONETARY_AUTHORITY":
+      throw new Error(`MonetaryAuthority ${String(actor.authorityId)} is not a market inventory actor`);
+  }
+}
+
+function addMoneyExpectation(
+  expectations: Map<string, MoneyExpectation>,
+  actor: ActorRef,
+  currencyId: CurrencyId,
+  delta: number,
+): void {
+  const key = `${actorRefKey(actor)}|${String(currencyId)}`;
+  const current = expectations.get(key);
+  expectations.set(key, { actor, currencyId, delta: (current?.delta ?? 0) + delta });
+}
+
+function addGoodsExpectation(
+  expectations: Map<string, GoodsExpectation>,
+  actor: ActorRef,
+  bucket: InventoryBucket,
+  goodId: GoodId,
+  delta: number,
+): void {
+  const key = `${actorRefKey(actor)}|${bucket}|${String(goodId)}`;
+  const current = expectations.get(key);
+  expectations.set(key, { actor, bucket, goodId, delta: (current?.delta ?? 0) + delta });
+}
+
+function assertAuthoritativePhase8Settlement(
+  frame: Phase8SettlementFrame,
+  moneyEpsilon: number,
+  quantityEpsilon: number,
+): { readonly householdPurchaseQuantity: number; readonly householdSpend: number } {
+  const moneyExpectations = new Map<string, MoneyExpectation>();
+  const goodsExpectations = new Map<string, GoodsExpectation>();
+  const householdIntentById = new Map(
+    (frame.context.householdMarketIntents ?? []).map((intent) => [String(intent.id), intent] as const),
+  );
+  const householdByCohort = new Map<string, {
+    readonly cohortId: Extract<ActorRef, { type: "COHORT" }>["cohortId"];
+    readonly currencyId: CurrencyId;
+    spend: number;
+    quantity: number;
+  }>();
+
+  for (const allocation of frame.context.marketAllocations) {
+    if (allocation.pass !== "MAIN") continue;
+    addGoodsExpectation(goodsExpectations, allocation.seller, allocation.sellerInventoryBucket, allocation.goodId, -allocation.quantity);
+    addGoodsExpectation(goodsExpectations, allocation.buyer, allocation.buyerInventoryBucket, allocation.goodId, allocation.quantity);
+    addMoneyExpectation(
+      moneyExpectations,
+      allocation.buyer,
+      allocation.marketCurrencyId,
+      -allocation.quantity * allocation.buyerGrossUnitPrice,
+    );
+    addMoneyExpectation(
+      moneyExpectations,
+      allocation.seller,
+      allocation.marketCurrencyId,
+      allocation.quantity * allocation.sellerNetUnitPrice,
+    );
+    if (allocation.consumptionTaxAmount > 0 && allocation.destinationStateId !== null) {
+      addMoneyExpectation(
+        moneyExpectations,
+        { type: "STATE", stateId: allocation.destinationStateId },
+        allocation.marketCurrencyId,
+        allocation.consumptionTaxAmount,
+      );
+    }
+
+    const intent = householdIntentById.get(String(allocation.buyerIntentId));
+    if (intent?.actor.type !== "COHORT" || intent.purpose !== "CONSUMPTION") continue;
+    const key = String(intent.actor.cohortId);
+    const current = householdByCohort.get(key);
+    householdByCohort.set(key, {
+      cohortId: intent.actor.cohortId,
+      currencyId: allocation.marketCurrencyId,
+      spend: (current?.spend ?? 0) + allocation.quantity * allocation.buyerGrossUnitPrice,
+      quantity: (current?.quantity ?? 0) + allocation.quantity,
+    });
+  }
+
+  for (const expectation of goodsExpectations.values()) {
+    const before = readActorInventory(
+      frame.prePhase8World,
+      expectation.actor,
+      expectation.bucket,
+      expectation.goodId,
+    );
+    const after = readActorInventory(
+      frame.postPhase8World,
+      expectation.actor,
+      expectation.bucket,
+      expectation.goodId,
+    );
+    expect(
+      Math.abs((after - before) - expectation.delta),
+      `${actorRefKey(expectation.actor)} ${expectation.bucket} ${String(expectation.goodId)} authoritative Phase-8 goods delta`,
+    ).toBeLessThanOrEqual(quantityEpsilon);
+  }
+
+  for (const expectation of moneyExpectations.values()) {
+    const before = readActorWallet(frame.prePhase8World, expectation.actor).get(expectation.currencyId) ?? 0;
+    const after = readActorWallet(frame.postPhase8World, expectation.actor).get(expectation.currencyId) ?? 0;
+    expect(
+      Math.abs((after - before) - expectation.delta),
+      `${actorRefKey(expectation.actor)} ${String(expectation.currencyId)} authoritative Phase-8 money delta`,
+    ).toBeLessThanOrEqual(moneyEpsilon);
+  }
+
+  let householdPurchaseQuantity = 0;
+  let householdSpend = 0;
+  for (const expectation of householdByCohort.values()) {
+    const postPhase5 = frame.postPhase5World.cohorts.get(expectation.cohortId);
+    const prePhase8 = frame.prePhase8World.cohorts.get(expectation.cohortId);
+    const postPhase8 = frame.postPhase8World.cohorts.get(expectation.cohortId);
+    expect(postPhase5).toBeDefined();
+    expect(prePhase8).toBeDefined();
+    expect(postPhase8).toBeDefined();
+    const postPhase5Cash = postPhase5!.wallet.get(expectation.currencyId) ?? 0;
+    const prePhase8Cash = prePhase8!.wallet.get(expectation.currencyId) ?? 0;
+    const postPhase8Cash = postPhase8!.wallet.get(expectation.currencyId) ?? 0;
+    expect(Math.abs(prePhase8Cash - postPhase5Cash)).toBeLessThanOrEqual(moneyEpsilon);
+    expect(expectation.spend).toBeLessThanOrEqual(prePhase8Cash + moneyEpsilon);
+    expect(Math.abs((prePhase8Cash - postPhase8Cash) - expectation.spend)).toBeLessThanOrEqual(moneyEpsilon);
+    householdPurchaseQuantity += expectation.quantity;
+    householdSpend += expectation.spend;
+  }
+
+  return { householdPurchaseQuantity, householdSpend };
+}
+
+function executeGoldenTickWithSettlementFrame(world: WorldState, tick: number) {
+  let postPhase5World: WorldState | undefined;
+  let frame: Phase8SettlementFrame | undefined;
+  const result = executeM4ClosedEconomyTick(
+    world,
+    tick,
+    options(world),
+    (phase, beforeWorld, afterWorld, context) => {
+      if (phase === 5) postPhase5World = afterWorld;
+      if (phase === 8) {
+        if (postPhase5World === undefined) throw new Error(`tick ${tick} reached Phase 8 before accepted Phase 5 state`);
+        frame = {
+          postPhase5World,
+          prePhase8World: beforeWorld,
+          postPhase8World: afterWorld,
+          context,
+        };
+      }
+    },
+  );
+  return { result, frame };
+}
+
 function runGolden(): {
   readonly hash: string;
   readonly extracted: number;
@@ -285,11 +491,15 @@ function runGolden(): {
 
   for (let tick = 0; tick < GOLDEN_TICKS; tick++) {
     const opening = world;
-    const result = executeM4ClosedEconomyTick(opening, tick, options(opening));
+    const { result, frame } = executeGoldenTickWithSettlementFrame(opening, tick);
 
     expect(result.phaseBoundaryError, `tick ${tick} phase boundary`).toBeUndefined();
     expect(result.reconciliationErrors, `tick ${tick} reconciliation`).toBeNull();
     expect(result.phaseTrace, `tick ${tick} phase trace`).toEqual([...Array(16).keys()]);
+    expect(frame, `tick ${tick} Phase-8 settlement frame`).toBeDefined();
+    const settlementEvidence = assertAuthoritativePhase8Settlement(frame!, moneyEpsilon, quantityEpsilon);
+    householdPurchaseQuantity += settlementEvidence.householdPurchaseQuantity;
+    householdSpend += settlementEvidence.householdSpend;
 
     for (const execution of result.context.productionExecutions ?? []) {
       assertFiniteNonNegative(`tick ${tick} realizedBatches`, execution.realizedBatches);
@@ -324,30 +534,6 @@ function runGolden(): {
       wageSettlements++;
     }
 
-    const householdIntentById = new Map(
-      (result.context.householdMarketIntents ?? []).map((intent) => [String(intent.id), intent] as const),
-    );
-    const netWageByCohort = new Map<string, number>();
-    for (const settlement of result.context.wageSettlements ?? []) {
-      const key = String(settlement.cohortId);
-      netWageByCohort.set(key, (netWageByCohort.get(key) ?? 0) + settlement.netWage);
-    }
-    const spendByCohort = new Map<string, number>();
-    for (const allocation of result.context.marketAllocations) {
-      const intent = householdIntentById.get(String(allocation.buyerIntentId));
-      if (intent?.actor.type !== "COHORT" || intent.purpose !== "CONSUMPTION") continue;
-      const key = String(intent.actor.cohortId);
-      const spend = allocation.quantity * allocation.buyerGrossUnitPrice;
-      spendByCohort.set(key, (spendByCohort.get(key) ?? 0) + spend);
-      householdPurchaseQuantity += allocation.quantity;
-      householdSpend += spend;
-    }
-    for (const [cohortId, spend] of spendByCohort) {
-      const cohort = [...opening.cohorts.values()].find((candidate) => String(candidate.cohortId) === cohortId)!;
-      const region = [...opening.regions.values()][0]!;
-      const openingCash = cohort.wallet.get(region.settlementCurrencyId) ?? 0;
-      expect(spend).toBeLessThanOrEqual(openingCash + (netWageByCohort.get(cohortId) ?? 0) + moneyEpsilon);
-    }
 
     for (const execution of result.context.capitalFormationExecutions ?? []) {
       assertFiniteNonNegative(`tick ${tick} capitalBuilt`, execution.capitalBuilt);
@@ -399,6 +585,33 @@ describe("REQ-ACCEPTANCE-005: M4 one-region 240-tick golden gate", () => {
     expect(first.wageSettlements).toBeGreaterThan(0);
     expect(first.hash).toMatch(/^[a-f0-9]{64}$/);
     expect(second).toEqual(first);
+  });
+
+  it("fails mechanically when Phase-8 stock application is neutralized but allocation evidence remains", () => {
+    let world = goldenOpeningWorld();
+    const moneyEpsilon = world.simulationConfig.numeric.moneyEpsilon ?? 1e-9;
+    const quantityEpsilon = world.simulationConfig.numeric.quantityEpsilon ?? 1e-9;
+
+    for (let tick = 0; tick < GOLDEN_TICKS; tick++) {
+      const { result, frame } = executeGoldenTickWithSettlementFrame(world, tick);
+      expect(result.phaseBoundaryError, `tick ${tick} phase boundary`).toBeUndefined();
+      expect(result.reconciliationErrors, `tick ${tick} reconciliation`).toBeNull();
+      expect(frame, `tick ${tick} Phase-8 settlement frame`).toBeDefined();
+      const evidence = assertAuthoritativePhase8Settlement(frame!, moneyEpsilon, quantityEpsilon);
+      if (evidence.householdPurchaseQuantity > 0) {
+        expect(() =>
+          assertAuthoritativePhase8Settlement(
+            { ...frame!, postPhase8World: frame!.prePhase8World },
+            moneyEpsilon,
+            quantityEpsilon,
+          ),
+        ).toThrow();
+        return;
+      }
+      world = result.world;
+    }
+
+    throw new Error("M4 golden produced no household MAIN allocation for Phase-8 sensitivity control");
   });
 
   it("makes persistent lifecycle-review state load-bearing in the normalized replay hash", () => {
