@@ -3,8 +3,16 @@
 GitHub forge property: a closed Issue carries no active status:* label, since the
 forge closed state and its reason are the durable resolution.
 
-This script runs on Issue closure and removes any status:* labels, ensuring they are
-cleaned up regardless of how the Issue was closed (ACCEPTOR merge, operator action, etc).
+The labels come off regardless of how the Issue was closed (ACCEPTOR merge, operator
+action, etc). Until #770 nothing ran this on closure, and 88 closed Issues kept a status
+label; the forge now applies the rule on every closure through `issue_status.py`
+(`.github/workflows/issue-status.yml`). The command line below still clears one Issue
+by hand.
+
+This module is also the one definition of what a status label *is*: `is_status_label`,
+which the two filters below and `issue_status.py` all use. A second spelling of the
+prefix elsewhere would let the closed-Issue rule and the open-Issue rule disagree about
+which labels are theirs.
 """
 
 from __future__ import annotations
@@ -17,6 +25,13 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
+STATUS_PREFIX = "status:"
+
+
+def is_status_label(name) -> bool:
+    """Whether a label name is on the `status:*` axis. The one definition; see above."""
+    return isinstance(name, str) and name.startswith(STATUS_PREFIX)
+
 
 def filter_status_labels(labels: list[dict]) -> list[str]:
     """Extract label names that do NOT start with 'status:'.
@@ -27,7 +42,7 @@ def filter_status_labels(labels: list[dict]) -> list[str]:
     Returns:
         List of label names that should be kept (not status:* labels)
     """
-    return [label["name"] for label in labels if not label["name"].startswith("status:")]
+    return [label["name"] for label in labels if not is_status_label(label["name"])]
 
 
 def get_status_labels(labels: list[dict]) -> list[str]:
@@ -39,7 +54,7 @@ def get_status_labels(labels: list[dict]) -> list[str]:
     Returns:
         List of status:* label names to be removed
     """
-    return [label["name"] for label in labels if label["name"].startswith("status:")]
+    return [label["name"] for label in labels if is_status_label(label["name"])]
 
 
 def remove_label_from_issue(
