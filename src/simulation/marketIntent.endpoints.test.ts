@@ -106,7 +106,6 @@ describe("MarketIntent physical endpoint conformance (#246)", () => {
     ["BUY", "CONSUMPTION"],
     ["SELL", "INVENTORY_REBALANCE"],
   ] as const)("rejects Clan %s because no physical goods endpoint exists", (side, purpose) => {
-    it.each([undefined, "GENERAL"] as const);
     for (const bucket of [undefined, "GENERAL"] as const) {
       expect(() => validateMarketIntent(intent(clan, side, purpose, bucket)))
         .toThrow(/Clan MarketIntent has no physical goods inventory/);

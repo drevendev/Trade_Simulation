@@ -1,9 +1,0 @@
-### FILE: src/simulation/marketIntent.endpoints.test.ts
-<<<<<<< FIND
-  ] as const)("rejects Clan %s because no physical goods endpoint exists", (side, purpose) => {
-    it.each([undefined, "GENERAL"] as const);
-    for (const bucket of [undefined, "GENERAL"] as const) {
-=======
-  ] as const)("rejects Clan %s because no physical goods endpoint exists", (side, purpose) => {
-    for (const bucket of [undefined, "GENERAL"] as const) {
->>>>>>> REPLACE
