@@ -56,15 +56,11 @@ const fixtureTaxPolicy: TaxPolicyProvider = {
 };
 
 /**
- * Seller-net price this fixture clears at.
- *
- * Phase 8 reads the price from `context.marketPrices` (Phase 6 this tick), else from
- * `world.markets`, else 10. These tests run Phase 8 alone and point the region at a market
- * ID the baseline world does not carry, so the price is exactly 10 with no Phase-6 handler
- * to configure -- the clean seller-net number the acceptance criterion states.
+ * Seller-net price this fixture clears at. The baseline Region's live LocalMarket carries
+ * food at 10, so direct Phase-8 fixtures exercise the canonical carried-price path without
+ * inventing a market or numeric runtime default.
  */
 const SELLER_NET_PRICE = 10;
-const UNSEEDED_MARKET = "mk:issue-481-tax-policy" as MarketId;
 
 interface Counterparties {
   readonly regionId: RegionId;
@@ -140,6 +136,20 @@ function buildWorld(): WorldState {
   return buildInitialWorld(baselineScenario, baselineDefinitionPack, createDefaultSimulationConfig(), 42);
 }
 
+function liveMarketId(world: WorldState, regionId: RegionId): MarketId {
+  const region = world.regions.get(regionId);
+  if (region === undefined) {
+    throw new Error(`missing test Region ${regionId}`);
+  }
+  const matches = Array.from(world.markets.values()).filter(
+    (market) => market.seed.regionKey === region.seed.key,
+  );
+  if (matches.length !== 1) {
+    throw new Error(`expected exactly one live LocalMarket for ${regionId}, found ${matches.length}`);
+  }
+  return matches[0]!.marketId;
+}
+
 describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", () => {
   it("prices the buyer's gross at sellerNet x (1 + rate x collectionEfficiency), not (1 + rate)", () => {
     const world = buildWorld();
@@ -155,7 +165,7 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
       world.pendingTransitions,
       createPhase8Handler({
         getFixtureIntents: () => buildIntents(actors, 1, 10.9),
-        getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+        getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
         collectTelemetry: true,
         taxPolicy: fixtureTaxPolicy,
       }),
@@ -199,7 +209,7 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
       world.pendingTransitions,
       createPhase8Handler({
         getFixtureIntents: () => buildIntents(actors, 1, 10.9),
-        getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+        getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
         collectTelemetry: false,
         taxPolicy: fixtureTaxPolicy,
       }),
@@ -251,7 +261,7 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
       uncontrolledWorld.pendingTransitions,
       createPhase8Handler({
         getFixtureIntents: () => buildIntents(actors, 1, 10.9),
-        getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+        getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
         collectTelemetry: true,
         taxPolicy: fixtureTaxPolicy,
       }),
@@ -264,6 +274,314 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
     // With no State to collect for, the buyer pays the seller-net price and nothing more.
     expect(allocation.buyerGrossUnitPrice).toBe(SELLER_NET_PRICE);
     expect(result.context.marketTelemetry[0]!.consumptionTaxCollected).toBe(0);
+  });
+
+  it("treats maxSpend = 0 as zero effective demand and clears nothing", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+
+    const result = executeTick(
+      world,
+      1,
+      world.pendingTransitions,
+      createPhase8Handler({
+        getFixtureIntents: () => buildIntents(actors, 1, 0),
+        getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
+        collectTelemetry: false,
+        taxPolicy: fixtureTaxPolicy,
+      }),
+    );
+
+    expect(result.reconciliationErrors).toBeNull();
+    expect(result.context.marketAllocations).toHaveLength(0);
+
+    const aggregates = Array.from(result.context.marketClearingAggregates.values());
+    expect(aggregates).toHaveLength(1);
+    expect(aggregates[0]!.effectiveDemandQuantity).toBe(0);
+    expect(aggregates[0]!.clearedQuantity).toBe(0);
+    expect(aggregates[0]!.offeredQuantity).toBeGreaterThan(0);
+  });
+
+  it("caps Phase-8 offered supply at live stock minus the seller's minimum reserve", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const seller = world.productionUnits.get(actors.sellerUnitId)!;
+    const boundedWorld: WorldState = {
+      ...world,
+      productionUnits: new Map(world.productionUnits).set(actors.sellerUnitId, {
+        ...seller,
+        outputInventory: new Map(seller.outputInventory).set(FOOD, 10),
+      }),
+    };
+    const intents = buildIntents(actors, 10, 1000).map((intent) =>
+      intent.side === "SELL"
+        ? { ...intent, desiredQuantity: 10, minimumReserveQuantity: 6 }
+        : intent,
+    );
+
+    const result = executeTick(
+      boundedWorld,
+      1,
+      boundedWorld.pendingTransitions,
+      createPhase8Handler({
+        getFixtureIntents: () => intents,
+        getFixtureMarketIds: () =>
+          new Map([[actors.regionId, liveMarketId(boundedWorld, actors.regionId)]]),
+        collectTelemetry: true,
+        taxPolicy: fixtureTaxPolicy,
+      }),
+    );
+
+    expect(result.reconciliationErrors).toBeNull();
+    expect(result.context.marketAllocations).toHaveLength(1);
+    expect(result.context.marketAllocations[0]!.quantity).toBeCloseTo(4, 10);
+
+    const aggregate = Array.from(result.context.marketClearingAggregates.values())[0]!;
+    expect(aggregate.offeredQuantity).toBeCloseTo(4, 10);
+    expect(aggregate.clearedQuantity).toBeCloseTo(4, 10);
+    expect(result.context.marketTelemetry[0]!.offeredQuantity).toBeCloseTo(4, 10);
+  });
+
+  it("shares one physical seller stock across duplicate SELL intents independent of insertion order", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const sellerState = world.productionUnits.get(actors.sellerUnitId)!;
+    const boundedWorld: WorldState = {
+      ...world,
+      productionUnits: new Map(world.productionUnits).set(actors.sellerUnitId, {
+        ...sellerState,
+        outputInventory: new Map(sellerState.outputInventory).set(FOOD, 5),
+      }),
+    };
+
+    const [sellerTemplate, buyer] = buildIntents(actors, 10, 1000);
+    const sellerA: MarketIntent = {
+      ...sellerTemplate!,
+      id: createMarketIntentId("mi:issue-251-duplicate-a"),
+      desiredQuantity: 4,
+      minimumReserveQuantity: 0,
+    };
+    const sellerB: MarketIntent = {
+      ...sellerTemplate!,
+      id: createMarketIntentId("mi:issue-251-duplicate-b"),
+      desiredQuantity: 4,
+      minimumReserveQuantity: 0,
+    };
+
+    const run = (sellerOrder: MarketIntent[]) =>
+      executeTick(
+        boundedWorld,
+        1,
+        boundedWorld.pendingTransitions,
+        createPhase8Handler({
+          getFixtureIntents: () => [...sellerOrder, buyer!],
+          getFixtureMarketIds: () =>
+            new Map([[actors.regionId, liveMarketId(boundedWorld, actors.regionId)]]),
+          collectTelemetry: true,
+          taxPolicy: fixtureTaxPolicy,
+        }),
+      );
+
+    const forward = run([sellerA, sellerB]);
+    const reversed = run([sellerB, sellerA]);
+
+    expect(forward.reconciliationErrors).toBeNull();
+    expect(reversed.reconciliationErrors).toBeNull();
+    expect(reversed.context.marketAllocations).toEqual(forward.context.marketAllocations);
+    expect(reversed.context.marketTelemetry).toEqual(forward.context.marketTelemetry);
+    expect(Array.from(reversed.context.marketClearingAggregates.entries())).toEqual(
+      Array.from(forward.context.marketClearingAggregates.entries()),
+    );
+
+    const totalAllocated = forward.context.marketAllocations.reduce(
+      (sum, allocation) => sum + allocation.quantity,
+      0,
+    );
+    expect(totalAllocated).toBeCloseTo(5, 10);
+    const aggregate = Array.from(forward.context.marketClearingAggregates.values())[0]!;
+    expect(aggregate.offeredQuantity).toBeCloseTo(5, 10);
+
+    const bySeller = new Map<string, number>();
+    for (const allocation of forward.context.marketAllocations) {
+      bySeller.set(
+        allocation.sellerIntentId,
+        (bySeller.get(allocation.sellerIntentId) ?? 0) + allocation.quantity,
+      );
+    }
+    expect(bySeller.get(sellerA.id)).toBeCloseTo(4, 10);
+    expect(bySeller.get(sellerB.id)).toBeCloseTo(1, 10);
+  });
+
+  it("keeps allocation identity and emitted group order stable when cross-good intent insertion is reversed", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const TOOLS = "good:tools" as GoodId;
+
+    const intents: MarketIntent[] = [
+      {
+        id: createMarketIntentId("mi:issue-251-food-seller"),
+        actor: { type: "PRODUCTION_UNIT" as const, productionUnitId: actors.sellerUnitId },
+        regionId: actors.regionId,
+        goodId: FOOD,
+        side: "SELL" as const,
+        purpose: "INVENTORY_REBALANCE" as const,
+        desiredQuantity: 2,
+        minimumReserveQuantity: 0,
+        inventoryBucket: "OUTPUT" as const,
+        sourcePlanId: "plan:issue-251-food-supply",
+      },
+      {
+        id: createMarketIntentId("mi:issue-251-food-buyer"),
+        actor: { type: "COHORT" as const, cohortId: actors.buyerCohortId },
+        regionId: actors.regionId,
+        goodId: FOOD,
+        side: "BUY" as const,
+        purpose: "CONSUMPTION" as const,
+        desiredQuantity: 1,
+        maxSpend: 100,
+        sourcePlanId: "plan:issue-251-food-demand",
+      },
+      {
+        id: createMarketIntentId("mi:issue-251-tools-seller"),
+        actor: { type: "PRODUCTION_UNIT" as const, productionUnitId: actors.sellerUnitId },
+        regionId: actors.regionId,
+        goodId: TOOLS,
+        side: "SELL" as const,
+        purpose: "INVENTORY_REBALANCE" as const,
+        desiredQuantity: 2,
+        minimumReserveQuantity: 0,
+        inventoryBucket: "OUTPUT" as const,
+        sourcePlanId: "plan:issue-251-tools-supply",
+      },
+      {
+        id: createMarketIntentId("mi:issue-251-tools-buyer"),
+        actor: { type: "COHORT" as const, cohortId: actors.buyerCohortId },
+        regionId: actors.regionId,
+        goodId: TOOLS,
+        side: "BUY" as const,
+        purpose: "CONSUMPTION" as const,
+        desiredQuantity: 1,
+        maxSpend: 100,
+        sourcePlanId: "plan:issue-251-tools-demand",
+      },
+    ];
+
+    const run = (orderedIntents: MarketIntent[]) =>
+      executeTick(
+        world,
+        1,
+        world.pendingTransitions,
+        createPhase8Handler({
+          getFixtureIntents: () => orderedIntents,
+          getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
+          collectTelemetry: true,
+          taxPolicy: fixtureTaxPolicy,
+        }),
+      );
+
+    const forward = run(intents);
+    const reversed = run([...intents].reverse());
+
+    expect(forward.reconciliationErrors).toBeNull();
+    expect(reversed.reconciliationErrors).toBeNull();
+    expect(forward.context.marketAllocations).toHaveLength(2);
+    expect(reversed.context.marketAllocations).toHaveLength(2);
+
+    expect(reversed.context.marketAllocations).toEqual(forward.context.marketAllocations);
+    expect(reversed.context.marketTelemetry).toEqual(forward.context.marketTelemetry);
+    expect(Array.from(reversed.context.marketClearingAggregates.entries())).toEqual(
+      Array.from(forward.context.marketClearingAggregates.entries()),
+    );
+  });
+
+  it("rejects an intent whose Region is absent instead of inventing a market", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const missingRegion = "region:missing-phase8" as RegionId;
+    const malformed = buildIntents(actors, 1, 10.9).map((intent) => ({
+      ...intent,
+      regionId: missingRegion,
+    }));
+
+    const handler = createPhase8Handler({
+      getFixtureIntents: () => malformed,
+      collectTelemetry: false,
+      taxPolicy: fixtureTaxPolicy,
+    });
+
+    expect(() => executeTick(world, 1, world.pendingTransitions, handler)).toThrow(
+      /references missing Region/,
+    );
+  });
+
+  it("rejects a fixture mapping to a live LocalMarket owned by another Region", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const region = world.regions.get(actors.regionId)!;
+    const wrongMarket = Array.from(world.markets.values()).find(
+      (market) => market.seed.regionKey !== region.seed.key,
+    )!.marketId;
+
+    const handler = createPhase8Handler({
+      getFixtureIntents: () => buildIntents(actors, 1, 10.9),
+      getFixtureMarketIds: () => new Map([[actors.regionId, wrongMarket]]),
+      collectTelemetry: false,
+      taxPolicy: fixtureTaxPolicy,
+    });
+
+    expect(() => executeTick(world, 1, world.pendingTransitions, handler)).toThrow(
+      /does not belong to Region/,
+    );
+  });
+
+  it("rejects missing canonical price evidence instead of using a numeric fallback", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const marketId = liveMarketId(world, actors.regionId);
+    const market = world.markets.get(marketId)!;
+    const prices = new Map(market.priceByGood);
+    prices.delete(FOOD);
+    const malformedWorld: WorldState = {
+      ...world,
+      markets: new Map(world.markets).set(marketId, { ...market, priceByGood: prices }),
+    };
+
+    const handler = createPhase8Handler({
+      getFixtureIntents: () => buildIntents(actors, 1, 10.9),
+      getFixtureMarketIds: () => new Map([[actors.regionId, marketId]]),
+      collectTelemetry: false,
+      taxPolicy: fixtureTaxPolicy,
+    });
+
+    expect(() =>
+      executeTick(malformedWorld, 1, malformedWorld.pendingTransitions, handler),
+    ).toThrow(/requires a finite positive canonical price/);
+  });
+
+  it("rejects a Region whose settlement currency is absent from WorldState", () => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const region = world.regions.get(actors.regionId)!;
+    const missingCurrency = "cur:missing-phase8" as CurrencyId;
+    const malformedWorld: WorldState = {
+      ...world,
+      regions: new Map(world.regions).set(actors.regionId, {
+        ...region,
+        settlementCurrencyId: missingCurrency,
+      }),
+    };
+
+    const handler = createPhase8Handler({
+      getFixtureIntents: () => buildIntents(actors, 1, 10.9),
+      getFixtureMarketIds: () =>
+        new Map([[actors.regionId, liveMarketId(malformedWorld, actors.regionId)]]),
+      collectTelemetry: false,
+      taxPolicy: fixtureTaxPolicy,
+    });
+
+    expect(() =>
+      executeTick(malformedWorld, 1, malformedWorld.pendingTransitions, handler),
+    ).toThrow(/settlement currency .* is missing from WorldState/);
   });
 
   it("refuses to clear a fixture that supplies no tax policy", () => {
@@ -283,7 +601,7 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
 
     const handler = createPhase8Handler({
       getFixtureIntents: () => buildIntents(actors, 1, 10.9),
-      getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+      getFixtureMarketIds: () => new Map([[actors.regionId, liveMarketId(world, actors.regionId)]]),
       collectTelemetry: false,
       taxPolicy: { getConsumptionTaxRate: () => 0.2, getCollectionEfficiency: () => 1.4 },
     });
