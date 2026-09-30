@@ -116,8 +116,9 @@ body does not name; it is superseded, not a finding.
   `## SLOPSTER QA: FINDING` comments; a finding that blocks acceptance comes with a
   `## Verdict: REQUEST_CHANGES`. Answer a refusal by pushing to the same branch; a
   verdict says nothing about a head that carries new content.
-- **A base merge is not a push of yours.** When `master` moves, the forge merges it
-  into your branch, and once the checks of the new head are in it posts a
+- **A base merge is not a push of yours.** When `master` moves, or your pull request
+  is opened or pushed already behind it (#769), the forge merges it into your branch,
+  and once the checks of the new head are in it posts a
   `## Head evidence` comment: the head, the four required checks with their links, and
   the chain of heads back to the one at which your diff last changed. A handoff
   or a verdict naming any head of that chain stands for it, as `AGENTS.md` says. Do not
