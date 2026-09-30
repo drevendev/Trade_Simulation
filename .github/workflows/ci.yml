@@ -12,6 +12,8 @@ permissions:
   contents: read
   # status-lint compares the status document against the merged pull requests.
   pull-requests: read
+  # issue-label-guard reads the labels of the Issues a pull request links.
+  issues: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -114,21 +116,33 @@ jobs:
       # label. Here it costs a re-run (#462). It refuses and names; it never applies the
       # label, which would decide the work's area on the author's behalf.
       #
+      # The linked Issues are those a closing keyword in the body names and those GitHub
+      # itself links — the sidebar included, which no reading of the body can see (#519).
+      # So the step names the pull request, and reads GitHub's answer with
+      # `pull-requests: read` and each Issue's labels with `issues: read` (#520). If that
+      # answer cannot be read, the body alone decides and the log carries a warning. A link
+      # made in the sidebar alone raises no event this workflow listens to; the next run
+      # reads it.
+      #
       # A pull request that links no Issue passes this step: that gate stays whole in
       # ACCEPTOR_RUNBOOK.md section 2, beside Issue completeness.
       #
       # The body arrives through the environment, never through an expression, for the
-      # same reason as the step above.
+      # same reason as the step above; so do the number and the repository, so that the
+      # shell line interpolates nothing.
       - name: Guard the label axes of the linked Issue
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_REF: ${{ github.head_ref }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           printf '%s' "${PR_BODY}" > "${RUNNER_TEMP}/issue-label-guard-body.md"
           python scripts/issue_label_guard.py \
-            --repo "${{ github.repository }}" \
+            --repo "${REPOSITORY}" \
+            --pull "${PR_NUMBER}" \
             --head-ref "${HEAD_REF}" \
             --body-file "${RUNNER_TEMP}/issue-label-guard-body.md"
 
