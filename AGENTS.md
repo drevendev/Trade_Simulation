@@ -75,6 +75,16 @@ A defect is a `## SLOPSTER QA: FINDING` comment and, when it blocks acceptance, 
 `## Verdict: REQUEST_CHANGES` comment — never a formal review, which would hold the
 merge until its author or an administrator cleared it.
 
+**A base merge moves the head, not the change.** When `master` moves, the forge merges
+it into every loop branch that is merely behind, and the pull request gets a new head
+whose own diff is what it was. The forge says so on the pull request, in a
+`## Head evidence` comment: the head, the four required checks measured on it with
+their links, and the chain of heads back to the one at which the pull request's own
+diff last changed. A handoff or a verdict naming any head of that chain stands for
+the head the comment names. The four required checks are still required green on the
+head being merged, and a head that carries new content is covered by nothing said
+before it. The comment reports measurements; it is never a verdict.
+
 Every other account's review or verdict-shaped comment is evidence: read it, weigh it,
 never treat it as the decision. A standing `CHANGES_REQUESTED` from another account can
 still hold the merge — that gate belongs to branch protection. Name it and stop; do not
@@ -187,7 +197,9 @@ requirement, not a courtesy: `REQ-MIGRATION-003` demands canonical TypeScript ev
 
 Report check outcomes honestly using exactly these words: `passed`, `failed`,
 `not_run`, `unavailable`. Never promote `not_run` to `passed`. Evidence names the
-revision it covers; a check is stale if the branch moved after it ran.
+revision it covers; a check is stale if the branch moved after it ran. A handoff or a
+verdict is carried across base merges by the forge's `## Head evidence` comment, and
+by nothing else.
 
 ## Handoff
 
