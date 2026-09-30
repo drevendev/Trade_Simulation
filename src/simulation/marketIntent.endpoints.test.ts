@@ -68,9 +68,8 @@ describe("MarketIntent physical endpoint conformance (#246)", () => {
     },
   );
 
-  it.each([undefined, "GENERAL"] as const)("rejects Clan SELL with bucket %s", (bucket) => {
-    expect(() => validateMarketIntent(intent(clan, "SELL", "INVENTORY_REBALANCE", bucket)))
-      .toThrow(/Clan SELL intent has no physical goods inventory/);
+  it.each(["BUY", "SELL"] as const)("rejects Clan %s for both generic bucket forms", (side) => {
+    it.each([undefined, "GENERAL"] as const);
   });
 
   it.each(["BUY", "SELL"] as const)("rejects MonetaryAuthority %s before settlement", (side) => {
@@ -103,9 +102,21 @@ describe("MarketIntent physical endpoint conformance (#246)", () => {
     }
   }
 
-  // This repair preserves Clan BUY shape validation; it does not authorize a new
-  // Clan goods inventory or weaken settlement's independent ownership preflight.
-  it.each([undefined, "GENERAL"] as const)("preserves Clan BUY validation with bucket %s", (bucket) => {
-    expect(() => validateMarketIntent(intent(clan, "BUY", "CONSUMPTION", bucket))).not.toThrow();
+  it.each([
+    ["BUY", "CONSUMPTION"],
+    ["SELL", "INVENTORY_REBALANCE"],
+  ] as const)("rejects Clan %s because no physical goods endpoint exists", (side, purpose) => {
+    it.each([undefined, "GENERAL"] as const);
+    for (const bucket of [undefined, "GENERAL"] as const) {
+      expect(() => validateMarketIntent(intent(clan, side, purpose, bucket)))
+        .toThrow(/Clan MarketIntent has no physical goods inventory/);
+    }
   });
+
+  it.each([undefined, "GENERAL"] as const)(
+    "keeps Cohort BUY valid as the negative control for Clan rejection with bucket %s",
+    (bucket) => {
+      expect(() => validateMarketIntent(intent(cohort, "BUY", "CONSUMPTION", bucket))).not.toThrow();
+    },
+  );
 });

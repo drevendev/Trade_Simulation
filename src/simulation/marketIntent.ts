@@ -126,8 +126,8 @@ export function validateMarketIntent(intent: MarketIntent): void {
   if (intent.actor.type === "MONETARY_AUTHORITY") {
     throw new Error("MonetaryAuthority is not a MarketIntent actor (HANDOFF-REPAIR-016)");
   }
-  if (intent.actor.type === "CLAN" && intent.side === "SELL") {
-    throw new Error("Clan SELL intent has no physical goods inventory");
+  if (intent.actor.type === "CLAN") {
+    throw new Error("Clan MarketIntent has no physical goods inventory");
   }
 
   // Inventory bucket validation
