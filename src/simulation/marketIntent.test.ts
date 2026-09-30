@@ -2,7 +2,7 @@
  * Tests for ephemeral MarketIntent contract and budget commitment ledger (REQ-MARKET-001).
  *
  * Covers:
- * 1. Valid MarketIntent creation for all actor types and purposes
+ * 1. Valid MarketIntent creation and unsupported-actor rejection
  * 2. Validation rejection of non-finite/negative quantities
  * 3. Budget commitment ledger creation and overcommitment prevention
  * 4. ProductionUnit bucket routing (INPUT, OUTPUT, INVESTMENT)
@@ -33,7 +33,7 @@ const testMarketId = "m:central" as MarketId;
 
 describe("MarketIntent validation", () => {
   describe("Valid MarketIntent creation", () => {
-    it("creates valid BUY intent for Clan consumer", () => {
+    it("rejects Clan BUY because a Clan owns no goods inventory", () => {
       const intent: MarketIntent = {
         id: createMarketIntentId("mi:clan-buy-1"),
         actor: { type: "CLAN", clanId: testClanId },
@@ -47,7 +47,8 @@ describe("MarketIntent validation", () => {
         inventoryBucket: "GENERAL",
       };
 
-      expect(() => validateMarketIntent(intent)).not.toThrow();
+      expect(() => validateMarketIntent(intent))
+        .toThrow(/Clan MarketIntent has no physical goods inventory/);
     });
 
     it("rejects Clan SELL because a Clan owns no goods inventory", () => {
@@ -64,7 +65,8 @@ describe("MarketIntent validation", () => {
         inventoryBucket: "GENERAL",
       };
 
-      expect(() => validateMarketIntent(intent)).toThrow(/Clan SELL intent has no physical goods inventory/);
+      expect(() => validateMarketIntent(intent))
+        .toThrow(/Clan MarketIntent has no physical goods inventory/);
     });
 
     it("creates valid BUY/INPUT intent for ProductionUnit", () => {
@@ -135,14 +137,14 @@ describe("MarketIntent validation", () => {
       expect(() => validateMarketIntent(intent)).not.toThrow();
     });
 
-    it("accepts zero desiredQuantity", () => {
+    it("accepts zero desiredQuantity for a valid State endpoint", () => {
       const intent: MarketIntent = {
         id: createMarketIntentId("mi:zero-qty-1"),
-        actor: { type: "CLAN", clanId: testClanId },
+        actor: { type: "STATE", stateId: testStateId },
         regionId: testRegionId,
         goodId: testGoodId,
         side: "BUY",
-        purpose: "CONSUMPTION",
+        purpose: "PUBLIC_PROCUREMENT",
         desiredQuantity: 0,
         maxSpend: 0,
         sourcePlanId: "plan:zero",
