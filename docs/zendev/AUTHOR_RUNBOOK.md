@@ -35,8 +35,9 @@ Take the first applicable item and stop searching:
 
 1. an open pull request of yours with **changes requested** — address the feedback;
 2. an open pull request of yours with a **failing required check** — fix it. Two
-   exceptions, both the forge's own work on the next push to `master`, after which the
-   branch is re-measured: a `mergeability` failure that reads *the base has moved*, and
+   exceptions, both the forge's own work on the next push to `master` (the first also on
+   the pull request's own event, #769), after which the branch is re-measured: a
+   `mergeability` failure that reads *the base has moved*, and
    a conflict confined to `docs/spec/implementation_status.csv` and the document
    generated from it, which every pull request rewrites and which
    `scripts/resolve_ledger_conflicts.py` merges by requirement identifier. A conflict

@@ -4,6 +4,7 @@ permitted — a guard that refuses everything protects nothing.
 """
 
 import pathlib
+import re
 import sys
 import unittest
 
@@ -249,3 +250,92 @@ class LedgerProvenanceClassTests(unittest.TestCase):
             [],
         )
 
+
+class DocumentedClassesTests(unittest.TestCase):
+    """`docs/zendev/MACHINE_PULL_REQUESTS.md` states `MACHINE_CLASSES` a second time,
+    for a reader, and the two drifted once: the guard carried `ledger-provenance` from
+    #319 while the document's table listed only the mirror, so a reader following the
+    contract classified a machine pull request as ordinary work (#573). The table is
+    compared with the tuple here, column by column, so a class added to one and not the
+    other fails a test rather than misleading whoever reads the prose.
+    """
+
+    DOCUMENT = REPO_ROOT / "docs" / "zendev" / "MACHINE_PULL_REQUESTS.md"
+
+    @staticmethod
+    def documented(text):
+        """The rows of the table under *The classes today*, keyed by branch.
+
+        Each value is `(producer, roots, generated, allowlist, committer)` spelled the
+        way `MachineClass` spells them: an owned directory written `dir/**` in the
+        document is the root `dir/`, and the words `nothing` and `none` are the empty
+        tuple and None.
+        """
+        section = text.split("The classes today:", 1)[1]
+        rows = {}
+        for line in section.splitlines():
+            line = line.strip()
+            if not line.startswith("|"):
+                if rows:
+                    break
+                continue
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            ticked = [re.findall(r"`([^`]+)`", cell) for cell in cells]
+            if not ticked[0]:
+                continue  # the header row and its rule
+            roots = tuple(
+                path[: -len("**")] if path.endswith("/**") else path for path in ticked[2]
+            )
+            rows[ticked[0][0]] = (
+                ticked[1][0],
+                roots,
+                frozenset(ticked[3]),
+                ticked[4][0] if ticked[4] else None,
+                ticked[5][0],
+            )
+        return rows
+
+    @staticmethod
+    def declared():
+        return {
+            cls.branch: (
+                cls.producer,
+                cls.roots,
+                frozenset(cls.generated),
+                cls.allowlist,
+                cls.committer,
+            )
+            for cls in guard.MACHINE_CLASSES
+        }
+
+    def test_the_document_lists_exactly_the_classes_the_guard_enforces(self):
+        self.assertEqual(
+            self.documented(self.DOCUMENT.read_text(encoding="utf-8")), self.declared()
+        )
+
+    def test_a_class_missing_from_the_document_is_caught(self):
+        # The #573 shape: the guard knows a class the table does not.
+        text = "\n".join(
+            line
+            for line in self.DOCUMENT.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("| `ledger-provenance`")
+        )
+        documented = self.documented(text)
+        self.assertNotIn("ledger-provenance", documented)
+        self.assertNotEqual(documented, self.declared())
+
+    def test_a_wrong_producer_in_the_document_is_caught(self):
+        text = self.DOCUMENT.read_text(encoding="utf-8").replace(
+            "| `ledger-provenance` | `.github/workflows/release-tag.yml` |",
+            "| `ledger-provenance` | `.github/workflows/spec-sync.yml` |",
+        )
+        self.assertNotEqual(self.documented(text), self.declared())
+
+    def test_pull_request_572_is_the_documented_shape(self):
+        # #572: head `b041962f` on `ledger-provenance`, one line changed in each of the
+        # two ledger files, committed by the workflow; merged as `86c110f7`. The
+        # documented row permits exactly those paths, and the guard agrees.
+        paths = ["docs/spec/IMPLEMENTATION_STATUS.md", "docs/spec/implementation_status.csv"]
+        row = self.documented(self.DOCUMENT.read_text(encoding="utf-8"))["ledger-provenance"]
+        self.assertEqual(row[2], frozenset(paths))
+        self.assertEqual(guard.check("ledger-provenance", paths, None, row[4]), [])
