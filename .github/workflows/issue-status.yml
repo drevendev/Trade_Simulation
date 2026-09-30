@@ -1,0 +1,136 @@
+name: Issue status labels
+
+# The `status:*` axis answers one question - what state is this Issue in - and is worth
+# something only while the answer is true. Two rules keep it true, and until now both
+# were left to whoever touched the Issue last:
+#
+# - A closed Issue carries no `status:*` label (#121). scripts/cleanup_closed_issues.py
+#   has said so since #130, and nothing ran it: 88 closed Issues still carried one when
+#   #770 was filed.
+# - An open Issue carries at most one, the one applied last (#214). A role told to
+#   replace the old label sometimes adds beside it (#160, #200), and an operator then
+#   rebuilds the state from the timeline.
+#
+# scripts/issue_status.py applies both, with the one definition of a status label that
+# cleanup_closed_issues.py holds:
+#
+# - `closed`: every `status:*` label comes off.
+# - `labeled` with a `status:*` label: on an open Issue the status label applied last,
+#   by the Issue's own label history, stays and the others come off; on a closed Issue
+#   every one comes off.
+# - `workflow_dispatch`: the one-off repair of every closed Issue that still carries
+#   one. `dry-run`, the default, lists them and changes nothing; `apply` removes.
+#
+# It only ever removes `status:*` labels: it never adds one, never touches another axis,
+# never closes or reopens anything and never touches a pull request. What each run
+# removed, and who applied the label it kept, is in the run's step summary, so a role
+# that keeps mislabelling is visible rather than silently corrected.
+#
+# No loop. The removals are made with GITHUB_TOKEN, and an event made with GITHUB_TOKEN
+# starts no workflow run; a removal is also an `unlabeled` event, which this workflow
+# does not listen to. The same rule has a price: a status label applied, or an Issue
+# closed, by a step acting as GITHUB_TOKEN starts no run here either (rework_limit.py's
+# `status:ready` is one, and it already leaves exactly one status label). The
+# dispatched repair covers whatever the closed half misses.
+on:
+  issues:
+    types: [closed, labeled]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run lists the closed Issues that still carry a status label; apply removes those labels"
+        type: choice
+        options: [dry-run, apply]
+        default: dry-run
+
+# One scope, for scripts/issue_status.py: it reads an Issue, its label history and the
+# list of closed Issues, and removes labels from Issues. All of it is `issues`, and
+# nothing else is granted. The checkout needs no `contents: read` on this public
+# repository - release-tag.yml and qa-intake.yml check it out under `permissions: {}` -
+# so if the repository ever went private, that scope would have to be added here.
+permissions:
+  issues: write
+
+jobs:
+  follow:
+    name: issue-status
+    # A cost gate, not the rule: the script decides again. Every label applied to any
+    # Issue starts a run of this workflow; only a `status:*` one starts this job.
+    if: >-
+      github.event_name == 'issues'
+      && (github.event.action == 'closed'
+      || (github.event.action == 'labeled' && startsWith(github.event.label.name, 'status:')))
+    # One run per Issue at a time, none cancelled. Not for correctness - every run
+    # decides from the Issue as it is and from its whole label history, so any order
+    # converges on the same label - but so that each run's summary reports what that run
+    # removed, not a race with another. A pending run replaced by a newer one loses
+    # nothing: the newer one decides from the same history.
+    concurrency:
+      group: issue-status-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No `ref:`. For an `issues` event the checkout is the default branch's head, the
+      # only revision that can define this workflow for that event, so nothing from the
+      # event chooses what runs. No credential is left behind: nothing here pushes.
+      - name: Check out the reviewed definition
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # Everything from the event reaches the script through the environment, never
+      # through expression interpolation into the shell line: a label name is text that
+      # anyone with triage access chooses. `--applied=` keeps a name that starts with a
+      # dash from reading as an option.
+      - name: Keep the status labels true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          EVENT_ACTION: ${{ github.event.action }}
+          APPLIED_LABEL: ${{ github.event.label.name }}
+          SENDER: ${{ github.event.sender.login }}
+        run: |
+          python scripts/issue_status.py event \
+            --repo "${REPOSITORY}" \
+            --issue "${ISSUE_NUMBER}" \
+            --action "${EVENT_ACTION}" \
+            --applied="${APPLIED_LABEL}" \
+            --sender="${SENDER}"
+
+  repair:
+    name: issue-status-repair
+    if: github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: issue-status-repair
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # No `ref:` either: a dispatch runs the revision it was dispatched on, the same one
+      # whose definition is running, and that is `master` unless someone chose otherwise.
+      - name: Check out the reviewed definition
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # The mode arrives through the environment like everything else, and the script
+      # refuses anything but `dry-run` or `apply`; an empty one is a dry run.
+      - name: Repair the closed Issues that still carry a status label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REPAIR_MODE: ${{ inputs.mode }}
+        run: |
+          python scripts/issue_status.py repair \
+            --repo "${REPOSITORY}" \
+            --mode="${REPAIR_MODE:-dry-run}"
