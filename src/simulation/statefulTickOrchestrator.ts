@@ -25,6 +25,18 @@ export type PhaseWorldTransition = (
   context: TickContext,
 ) => WorldState;
 
+/**
+ * Optional read-only diagnostic seam invoked only after an accepted phase transition.
+ * It observes the exact authoritative before/after WorldState pair without changing
+ * phase order, reconciliation, or the transition selected by the caller.
+ */
+export type PhaseWorldTransitionObserver = (
+  phase: number,
+  beforeWorld: WorldState,
+  afterWorld: WorldState,
+  context: TickContext,
+) => void;
+
 export interface StatefulTickExecutionResult {
   readonly world: WorldState;
   readonly context: TickContext;
@@ -48,6 +60,7 @@ export function executeStatefulTick(
   tickNumber: number,
   handler: PhaseHandler,
   applyPhaseTransition: PhaseWorldTransition,
+  observePhaseTransition?: PhaseWorldTransitionObserver,
 ): StatefulTickExecutionResult {
   let world = openingWorld;
   let context = initializeTickContext(tickNumber, openingWorld.seed);
@@ -75,7 +88,9 @@ export function executeStatefulTick(
       };
     }
 
-    world = applyPhaseTransition(phase, world, context);
+    const beforeWorld = world;
+    world = applyPhaseTransition(phase, beforeWorld, context);
+    observePhaseTransition?.(phase, beforeWorld, world, context);
   }
 
   return { world, context, phaseTrace, reconciliationErrors: null };

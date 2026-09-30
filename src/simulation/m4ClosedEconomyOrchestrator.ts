@@ -72,6 +72,7 @@ import {
 } from "./tickOrchestrator";
 import {
   executeStatefulTick,
+  type PhaseWorldTransitionObserver,
   type StatefulTickExecutionResult,
 } from "./statefulTickOrchestrator";
 import type { RegionState, WorldState } from "./worldState";
@@ -508,6 +509,7 @@ export function executeM4ClosedEconomyTick(
   openingWorld: WorldState,
   tick: number,
   options: M4ClosedEconomyOptions,
+  observePhaseTransition?: PhaseWorldTransitionObserver,
 ): StatefulTickExecutionResult {
   requireSingleLocalMarket(openingWorld, requireSingleRegion(openingWorld));
 
@@ -599,5 +601,5 @@ export function executeM4ClosedEconomyTick(
       return applyWageOfferStateTransition(applyProductionSignalCloseTransition(world, context), context);
     }
     return world;
-  });
+  }, observePhaseTransition);
 }
