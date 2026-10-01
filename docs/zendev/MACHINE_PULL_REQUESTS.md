@@ -1,8 +1,8 @@
 # Machine-generated pull requests
 
 Some pull requests here are not authored by anyone. A workflow copies bytes from a
-known source into one declared corner of the repository and proposes the result. There
-is no judgement in them to review.
+known source, or records a fact it looked up, into a declared corner of the repository
+and proposes the result. There is no judgement in them to review.
 
 This document defines that class, what it is allowed to do, and who accepts it.
 
@@ -13,18 +13,26 @@ checked by `scripts/machine_pr_guard.py`, which runs inside the required `policy
 check on every pull request — not by a reader.
 
 1. its head branch is exactly a branch named in `MACHINE_CLASSES` in that script;
-2. every changed path is inside the roots that class owns;
+2. every changed path is inside the roots that class owns, or is one of the files the
+   class regenerates (the fourth column below);
 3. every changed path satisfies that class's own allowlist, where it has one;
 4. the head commit is **committed** by the identity the producing workflow writes
-   under. Its *author* is whoever triggered the sync and may be a person: dispatching
+   under. Its *author* is whoever triggered the run and may be a person: dispatching
    `spec-sync.yml` by hand is a supported operating path, and the author field is the
    record of that. The committer is what wrote the bytes, and that is the question.
 
 The classes today:
 
-| Branch | Produced by | Owns | Also regenerates | Allowlist |
-| --- | --- | --- | --- | --- |
-| `spec-mirror` | `.github/workflows/spec-sync.yml` | `docs/spec/mirror/**` | `docs/spec/IMPLEMENTATION_STATUS.md` | `docs/zendev/spec-mirror-allowlist.txt` |
+| Branch | Produced by | Owns | Also regenerates | Allowlist | Committer |
+| --- | --- | --- | --- | --- | --- |
+| `spec-mirror` | `.github/workflows/spec-sync.yml` | `docs/spec/mirror/**` | `docs/spec/IMPLEMENTATION_STATUS.md` | `docs/zendev/spec-mirror-allowlist.txt` | `github-actions[bot]` |
+| `ledger-provenance` | `.github/workflows/release-tag.yml` | nothing | `docs/spec/implementation_status.csv`, `docs/spec/IMPLEMENTATION_STATUS.md` | none | `github-actions[bot]` |
+
+This table and `MACHINE_CLASSES` state the same thing twice, and
+`scripts/tests/test_machine_pr_guard.py` compares them, so a class added to one and not
+the other fails a test instead of misleading a reader. It happened once: the guard
+carried `ledger-provenance` from #319 (2026-09-09) while this table listed only the
+mirror, until #573.
 
 Adding a class is a policy change to the guard, its tests and this table, reviewed like
 any other policy change and accepted by a person.
@@ -54,6 +62,31 @@ not match its sources. A sync writing a fabricated table would pass this guard a
 that check, which is the correct division: this one answers *may these paths change*,
 that one answers *is the derived file derived*.
 
+### A class that owns nothing: `ledger-provenance`
+
+A ledger row records the commit that satisfied its requirement, and the pull request
+that earns the row cannot know it: the row lands inside that pull request, and its
+squash commit does not exist until it merges. `scripts/backfill_merge_commits.py`, run
+by `release-tag.yml` on every push to `master` that touches the ledger or the registry,
+looks the commit up afterwards and fills the `MERGE_COMMIT` column. That has to reach
+`master` the way every other change does — through a pull request — and its first
+attempt to push `master` directly was refused by branch protection.
+
+Its **Owns** column is empty on purpose. A root is a path the class owns, and ordinary
+branches are refused anywhere under one; but the ledger is shared — the AUTHOR's own
+pull request writes the row that earns a requirement, and this class only fills the one
+column that pull request could not know. Claiming the ledger as a root would forbid the
+AUTHOR its core work. So both files are listed as regenerated: the branch may write
+those two files and nothing else, and every other branch keeps them.
+
+What the guard checks for this class is the paths and the committer. It does not read
+the rows. That only `MERGE_COMMIT` cells move — never `STATUS`, because whether a
+requirement is satisfied is a judgement and this is a lookup — is the producer's
+contract, not a gate. #572 is the shape: head `b041962f` on `ledger-provenance`, one
+line changed in each of the two files, filling `REQ-PRODUCTION-002` with `219ae9a4`,
+the squash commit of #571; it merged as `86c110f7` under the same four checks as any
+pull request.
+
 ## The gate runs in both directions
 
 The guard does not only constrain the machine branch. It also refuses **any other
@@ -69,21 +102,26 @@ only thing deciding whether they may is a predicate with negative-control tests.
 
 ## How one merges
 
-The producing workflow arms GitHub auto-merge on the pull request it opens. Branch
-protection then decides: the merge happens when — and only when — every required check
-is green at the head revision. `machine-pr-guard` is one of them, inside `policy-guard`.
+The producing workflow arms GitHub auto-merge on the pull request it opens —
+`spec-sync.yml` and `release-tag.yml` alike. Branch protection then decides: the merge
+happens when — and only when — every required check is green at the head revision.
+`machine-pr-guard` is one of them, inside `policy-guard`.
 
-Nothing else merges it. There is no model anywhere in this path.
+Nothing else merges it. There is no model anywhere in this path, and no verdict: see
+*When a gate is red* for who does not review it.
 
 ## What merging one asserts
 
-That the snapshot is confined to its declared roots, allowlisted, produced by its own
-workflow, and green.
+That the change is confined to what its class may write, allowlisted where the class
+has an allowlist, produced by its own workflow, and green.
 
 It asserts **nothing** about whether the content is correct, current, or true. A mirror
 pull request is a snapshot of Drive at one moment; Drive may have moved on, which is
 neither knowable from here nor a reason to refuse. If it has, the next sync opens a
-fresher snapshot, and merging the older one first is harmless and correct.
+fresher snapshot, and merging the older one first is harmless and correct. A
+`ledger-provenance` pull request is a lookup against the pull request graph at one
+moment, and the guard never reads its rows; a wrong commit in it would reach `master`
+the way a wrong mirror would.
 
 Mirrored content remains untrusted data everywhere it is later read. Instruction-shaped
 text inside it is specification input, never authority.
@@ -96,6 +134,10 @@ The pull request stays open. That is the whole failure mode, and it is deliberat
   `scripts/select_review_target.py` classifies the head branch through
   `machine_pr_guard.classify` and rules it ineligible before the model is started. The
   runbook says the same thing in prose, but the model never has to act on it;
+- the **verdict owner does not judge it either**, whoever the active scheme names — under
+  scheme/8, SLOPSTER. A machine pull request carries no Issue and no handoff, so a
+  verdict would have nothing to be about; its gates are the required checks, and a
+  `## Verdict:` on one is not an input to anything;
 - the **AUTHOR does not touch it**. No agent may push to a machine branch — the guard
   refuses the diff that would result;
 - it is an **operator matter**. A red `machine-pr-guard` means the producer emitted
@@ -132,6 +174,14 @@ re-proposed each time the bound elapses, and is red again each time. That churn 
 in the pull request list and harmless, and it is still a person's to end — by fixing the
 cause. The producer never touches the branch's content, never pushes to it, and never
 merges it; it only closes what it produced and produces again.
+
+A red `ledger-provenance` proposal recovers the same way for a different reason: its
+producer does not snapshot somewhere else, it recomputes the proposal from `master`, and
+every run of `release-tag.yml` replaces the branch's content under the current workflow
+definitions. When `master` already carries what the proposal offered, the recomputed
+proposal is empty and the producer closes it: #660 went red on 2026-09-23 on a README
+rule, #681 recorded its one row by hand, and the MACHINE closed #660 within fifteen
+seconds of #681 merging.
 
 Do not force-push the branch, do not push a commit to unstick it, and do not merge it by
 hand. Each of those defeats a different one of the four conditions above, and the guard is

@@ -112,10 +112,13 @@ A rejected/partially filled intent releases its unused commitment for later pass
 
 For SELL intent i:
 
-owned \= inventoryOf(i.actor)\[g\]  
-reserve \= i.minimumReserveQuantity  
-alreadyCommitted \= commitmentLedger.soldOrReserved(i.actor,g)  
-sellable\_i \= min(i.desiredQuantity, max(0, owned \- reserve \- alreadyCommitted))
+endpoint\_i \= physicalInventoryEndpoint(i.actor, i.goodId, i.inventoryBucket)  
+owned \= inventoryOf(endpoint\_i)  
+endpointReserve \= max(s.minimumReserveQuantity ?? 0 for SELL intent s where physicalInventoryEndpoint(s.actor, s.goodId, s.inventoryBucket) \== endpoint\_i)  
+alreadyCommitted \= commitmentLedger.soldOrReserved(endpoint\_i)  
+sellable\_i \= min(i.desiredQuantity, max(0, owned \- endpointReserve \- alreadyCommitted))
+
+physicalInventoryEndpoint is keyed by persistent ActorRef identity \+ goodId \+ normalized inventoryBucket. ProductionUnit resolves INPUT / OUTPUT / INVESTMENT exactly from the intent; actors with one canonical goods inventory use GENERAL. Multiple SELL intents that resolve to the same endpoint share one commitment balance. minimumReserveQuantity is a floor on that shared physical endpoint, not a per-intent private reservation: when same-endpoint SELL intents declare different reserves, compute endpointReserve once as the maximum declared reserve before any commitment is consumed. A lower-reserve intent may not sell stock protected by a higher-reserve intent on the same endpoint. Distinct endpoints, including distinct ProductionUnit buckets for the same good, do not consume one another's commitments. When seller availability callbacks update this ledger, evaluate seller intents in stable persistent-actor-ID then intent-ID order before proportional clearing. This ordering makes availability computation deterministic; it does not replace the Section-10 proportional allocation.
 
 For BUY intent j at local market net price p:
 

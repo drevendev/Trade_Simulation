@@ -1,0 +1,114 @@
+name: Head evidence
+
+# What the forge measured on a pull request's head, said where it can be read.
+#
+# A handoff and a verdict name "the exact head", and the forge itself moves heads: a
+# loop branch that is merely behind is merged with `master` every time `master` moves.
+# #661 changed head nine times in four days without its own diff changing by a line and
+# was refused for a stale handoff; the same refusal said the required checks of that
+# head could not be observed, though all four were green (#765).
+#
+# So when the checks of a head are in, `scripts/head_evidence.py` writes one comment on
+# the pull request: the four required checks with the links they were measured at, and
+# the chain of heads back to the one at which the pull request's own diff last
+# changed. `AGENTS.md` makes a handoff or a verdict naming any head of that chain stand
+# for the head the comment names. A head that is not green gets no comment.
+#
+# `workflow_run`, so the definition and the script are `master`'s whatever branch the
+# completed run was about — the same rule as mergeability.yml, pr-ledger.yml and
+# zen-edit.yml, reached through the trigger that fires when there is something to
+# report. Nothing from the judged branch is checked out or executed: the head is
+# fetched into the object store and read with `git diff`
+# (scripts/tests/test_head_evidence.py holds this file to that).
+on:
+  workflow_run:
+    workflows: [CI, Mergeability]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Head commit to report on (repair, or a head that predates this workflow)"
+        required: true
+        type: string
+
+# Reads only, from `github.token`. The comment is the MACHINE identity's, minted below
+# for this repository alone, so it is the forge's voice on the pull request and not a
+# workflow's.
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  statuses: read
+
+# One queue per head: the two workflows complete within a minute of each other, and
+# the second run must see the comment the first one posted.
+concurrency:
+  group: head-evidence-${{ github.event.workflow_run.head_sha || inputs.sha }}
+  cancel-in-progress: false
+
+jobs:
+  # Named apart from any commit status this repository writes (see
+  # scripts/tests/test_check_names_are_unambiguous.py).
+  post-head-evidence:
+    name: post-head-evidence
+    # Pull request activity only. A push to `master` completes the same two workflows
+    # and has no pull request head to report on.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event.workflow_run.event == 'pull_request'
+      || github.event.workflow_run.event == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The default branch, which is the default for this event and is load-bearing: a
+      # `ref:` here would run another revision's copy of the script. Full history,
+      # because the chain of base merges is read from it.
+      - name: Check out the reviewed definition
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # Into the object store only. The commit is never checked out, and the one
+      # program that reads it is the reviewed script below, through `git diff`. The
+      # name reaches the shell through the environment, never through expression
+      # interpolation: on a dispatch it is text an operator typed.
+      - name: Fetch the head, as data
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}
+        run: git fetch --no-tags origin "${HEAD_SHA}"
+
+      - name: Measure the head
+        id: measure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python scripts/head_evidence.py \
+            --repo "${REPOSITORY}" \
+            --sha "${HEAD_SHA}" \
+            --report "${RUNNER_TEMP}/head-evidence.md"
+
+      # Minted only when there is something to say, for this repository alone, and
+      # revoked with the job (docs/adr/0006-github-apps-as-loop-identities.md).
+      - name: Act as the MACHINE identity
+        id: identity
+        if: steps.measure.outputs.outcome == 'evidence'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.ZENDEV_MACHINE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ZENDEV_MACHINE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Say it on the pull request
+        if: steps.measure.outputs.outcome == 'evidence'
+        env:
+          GH_TOKEN: ${{ steps.identity.outputs.token }}
+          PR_NUMBER: ${{ steps.measure.outputs.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh pr comment "${PR_NUMBER}" --repo "${REPOSITORY}" --body-file "${RUNNER_TEMP}/head-evidence.md"

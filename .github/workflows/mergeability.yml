@@ -12,8 +12,9 @@ name: Mergeability
 # one, and the revision under judgement cannot change what judges it (#495). The
 # default checkout of such a run is the base branch, and nothing here checks out or
 # executes the pull request's own code — the one rule that makes the trigger safe to
-# hold `statuses: write`. `scripts/tests/test_mergeability_trust.py` refuses the edits
-# that would undo any of this.
+# hold `statuses: write`, and since #769 a MACHINE credential confined to the event's
+# own pull request. `scripts/tests/test_mergeability_trust.py` refuses the edits that
+# would undo any of this.
 #
 # A property that cost a review run to discover: a conflicting pull request gets no
 # `pull_request` run at all. GitHub runs those against `refs/pull/N/merge`, and for a
@@ -31,10 +32,11 @@ on:
   workflow_dispatch:
 
 # `statuses: write` is the whole grant `github.token` needs: this workflow writes one
-# commit status and reads pull request metadata. The two repair steps at the end act as
-# the MACHINE app instead, whose own installation permits the push — a workflow token
-# with `contents: write` would push without starting any workflow, which is the one
-# thing a repaired branch must do.
+# commit status and reads pull request metadata. The repair steps — the update of the
+# event's own pull request (#769) and the two at the end — act as the MACHINE app
+# instead, whose own installation permits the push; a workflow token with
+# `contents: write` would push without starting any workflow, which is the one thing a
+# repaired branch must do.
 permissions:
   contents: read
   pull-requests: read
@@ -102,6 +104,75 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python scripts/mergeability.py --repo "${{ github.repository }}" --pull "${PR_NUMBER}"
+
+      # A branch can be born behind as well as fall behind: started from an older base,
+      # or `master` moved between its author's fetch and its push. The sweep below runs
+      # only when `master` moves, so such a pull request carried a red required check
+      # until the next push to `master` — fifteen hours on #767, whose handoff was
+      # already written, while `master` stood still (#769). These two steps give the
+      # event's pull request the base merge the sweep would give it, in the run that
+      # measured it behind.
+      #
+      # Not a second copy of the sweep's rules: the same script, confined by `--pull` to
+      # the event's own number, so `should_update` decides and `MAINTAINED_PREFIXES`
+      # bounds the classes. A `claude/**` draft, `policy/**`, the machine classes
+      # (`spec-mirror`, `ledger-provenance`), a conflict (`dirty`), and a branch that
+      # already contains its base are left exactly as the sweep leaves them. So is a
+      # fork: the script refuses a head that does not live in this repository
+      # (`test_a_fork_head_is_not_ours_to_move`), and the token is minted for this
+      # repository alone. That refusal stays in the script, because an `if:` here would
+      # have to name the judged head's fields, which the trust boundary refuses anywhere
+      # in this file.
+      #
+      # Safe on `pull_request_target` for the reason the status step above is (#495),
+      # now with a credential that can push: the definition and the scripts are the base
+      # branch's, `master`'s; the checkout names no `ref:`, so its working tree is the
+      # base's tip; and nothing from the pull request is checked out or executed. The
+      # script reads the pull request through the API and asks the forge to merge
+      # server-side, so the judged revision never runs here. The number reaches the shell
+      # through the environment, and `--pull` makes it the only pull request this step
+      # can touch. Fanning out stays the sweep's, on `master` alone.
+      #
+      # It settles in one round. The MACHINE's push is a `synchronize` for this pull
+      # request, and that run measures a head that contains its base: `should_update`
+      # answers "already contains the tip of its base". Another merge follows only if
+      # `master` moved again in between, which is what a merge is for.
+      #
+      # Concurrency: this pull request's own group, with `cancel-in-progress: false`, so
+      # a running update is never cancelled. A newer event for it waits, and a run
+      # superseded while waiting loses nothing, since every run reads the pull request as
+      # it stands. The update is one request the forge performs whole, pinned to the head
+      # it read (`expected_head_sha`), so a stopped job leaves no half-merged branch. The
+      # sweep runs in `master`'s group and can reach the same branch in the same minute;
+      # that is the race it already has with an author's push, and the pin refuses
+      # whichever request arrives after the head has moved.
+      #
+      # The MACHINE identity, for the reason the sweep gives below: a push made with
+      # `github.token` starts no workflows, and the merged head would sit unmeasured. A
+      # failed mint warns and leaves the branch to its author, as there.
+      - name: Act as the MACHINE identity for this pull request
+        id: pull_identity
+        if: github.event_name == 'pull_request_target'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.ZENDEV_MACHINE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ZENDEV_MACHINE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Update this pull request if it is merely behind
+        if: github.event_name == 'pull_request_target'
+        env:
+          GH_TOKEN: ${{ steps.pull_identity.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::no MACHINE identity token; #${PR_NUMBER}, if behind, stays with its author"
+            exit 0
+          fi
+          python scripts/update_branches.py --repo "${REPOSITORY}" --pull "${PR_NUMBER}"
 
       # From `master` only, like the three steps below it. A `push` cannot arrive from
       # anywhere else now, but a `workflow_dispatch` can be started on any ref, and

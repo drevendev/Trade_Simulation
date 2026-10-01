@@ -844,4 +844,15 @@ Dependency order: REQ-MIGRATION-006 \+ REQ-CONFIG-011 → REQ-MIGRATION-007 → 
 REQ-MIGRATION-006 is final archive/delete or reference-only quarantine after REQ-MIGRATION-005 has already removed canonical runtime dependence on City/Pop/Market/Deal.  
 The M12 visualization share is 1/5 \= 20%, above the baseline 5% rule. No new implementation-package file was added, so no mirror allowlist request is required.  
 STATUS: ANSWERED / M12\_INDEXED / MIRROR\_VERIFICATION\_PENDING  
-8  
+8
+
+2026-09-29 — HANDOFF-REPAIR-M4-007 — Phase-4 physical inventory endpoint commitment identity  
+Markets section 7 now defines seller commitment identity as persistent ActorRef \+ goodId \+ normalized inventoryBucket. Owned stock and alreadyCommitted use that same physical endpoint. Multiple SELL intents sharing an endpoint share one balance; distinct ProductionUnit INPUT, OUTPUT, and INVESTMENT buckets remain independent. Availability evaluation is stable persistent-actor-ID then intent-ID before proportional clearing.
+
+The corresponding M4 Phase-4 repair is bounded to this endpoint key, deterministic seller pre-ordering, and focused duplicate-endpoint/reserve/order/distinct-bucket regressions. Issue \#251 remains the generic clearing primitive and retains its explicit Phase-4 non-goal. The separate R590 moneyEpsilon affordability defect remains independent.
+
+No new implementation-package file was added; no mirror allowlist change is required. Normal MACHINE synchronization should update the existing Markets mirror.  
+STATUS: SPEC\_REPAIRED / IMPLEMENTATION\_REPAIR\_REQUIRE  
+2026-09-29 — HANDOFF-REPAIR-M4-008 implementation answer  
+For Phase-4 seller availability, group SELL intents by persistent ActorRef \+ goodId \+ normalized inventoryBucket. Before consuming any commitment, compute endpointReserve as the maximum minimumReserveQuantity declared by intents in that endpoint group, defaulting omitted reserves to zero. Then compute each sellable quantity against owned \- endpointReserve \- shared alreadyCommitted in stable persistent-actor-ID then intent-ID order. A lower-reserve intent must not consume stock protected by a higher-reserve same-endpoint intent. Distinct inventory buckets remain independent. This is a focused Phase-4 repair; the separate Phase-4 moneyEpsilon affordability wiring defect remains independent.
+
