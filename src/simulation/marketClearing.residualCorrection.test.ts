@@ -46,6 +46,48 @@ describe("REQ-MARKET-003 residual correction", () => {
     expect(fill(sellerB.id)).toBeLessThanOrEqual(b + 1e-8);
   });
 
+  it("settles positive micro-lots instead of dropping aggregate cleared quantity", () => {
+    const micro = 9e-9;
+    const total = micro * 2;
+    const sellerA: MarketIntent = {
+      id: createMarketIntentId("mi:micro-seller-a"), actor: { type: "CLAN", clanId: "c:micro-a" as ClanId },
+      regionId, goodId, side: "SELL", purpose: "INVENTORY_REBALANCE", desiredQuantity: micro, sourcePlanId: "plan:micro-seller-a",
+    };
+    const sellerB: MarketIntent = {
+      id: createMarketIntentId("mi:micro-seller-b"), actor: { type: "CLAN", clanId: "c:micro-b" as ClanId },
+      regionId, goodId, side: "SELL", purpose: "INVENTORY_REBALANCE", desiredQuantity: micro, sourcePlanId: "plan:micro-seller-b",
+    };
+    const buyerA: MarketIntent = {
+      id: createMarketIntentId("mi:micro-buyer-a"), actor: { type: "COHORT", cohortId: "cohort:micro-a" as CohortId },
+      regionId, goodId, side: "BUY", purpose: "CONSUMPTION", desiredQuantity: micro, maxSpend: micro, sourcePlanId: "plan:micro-buyer-a",
+    };
+    const buyerB: MarketIntent = {
+      id: createMarketIntentId("mi:micro-buyer-b"), actor: { type: "COHORT", cohortId: "cohort:micro-b" as CohortId },
+      regionId, goodId, side: "BUY", purpose: "CONSUMPTION", desiredQuantity: micro, maxSpend: micro, sourcePlanId: "plan:micro-buyer-b",
+    };
+
+    const allocations = computeLocalClearing(
+      input(
+        [buyerB, buyerA],
+        [sellerB, sellerA],
+        new Map([[buyerA.id, micro], [buyerB.id, micro]]),
+        new Map([[sellerA.id, micro], [sellerB.id, micro]]),
+      ),
+      new Map(),
+      1,
+      1e-8,
+      { value: 0 },
+    );
+
+    expect(allocations).toHaveLength(2);
+    expect(allocations.reduce((sum, allocation) => sum + allocation.quantity, 0)).toBeCloseTo(total, 16);
+    expect(allocations.every((allocation) => allocation.quantity > 0)).toBe(true);
+    expect(allocations.map((allocation) => [allocation.sellerIntentId, allocation.buyerIntentId])).toEqual([
+      [sellerA.id, buyerA.id],
+      [sellerB.id, buyerB.id],
+    ]);
+  });
+
   it("uses canonical Cohort actor order before intent ID", () => {
     const firstCohort = "cohort:aaa" as CohortId;
     const laterCohort = "cohort:zzz" as CohortId;

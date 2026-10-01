@@ -206,7 +206,6 @@ export function computeLocalClearing(
     correctedBuyerAllocations,
     marketPrice,
     allocationIdCounter,
-    quantityEpsilon,
   );
 
   return allocations;
@@ -288,7 +287,6 @@ function twoPointerMatcher(
   }>,
   marketPrice: number,
   allocationIdCounter: { value: number },
-  quantityEpsilon: number,
 ): MarketAllocation[] {
   const allocations: MarketAllocation[] = [];
 
@@ -302,7 +300,7 @@ function twoPointerMatcher(
     const buyerData = buyerAllocations[buyerIdx]!;
 
     const matched = Math.min(sellerRemaining, buyerRemaining);
-    if (matched > quantityEpsilon) {
+    if (matched > 0) {
       const seller = sellerData.intent;
       const buyer = buyerData.intent;
 
@@ -351,11 +349,15 @@ function twoPointerMatcher(
     sellerRemaining -= matched;
     buyerRemaining -= matched;
 
-    if (sellerRemaining <= quantityEpsilon) {
+    // Epsilon belongs to aggregate reconciliation, not to individual lots.
+    // A positive sub-epsilon fill is still real cleared quantity and must settle.
+    // Subtracting the exact matched operand makes at least one remainder exactly zero,
+    // so exact exhaustion advances the pointer without silently discarding micro-lots.
+    if (sellerRemaining <= 0) {
       sellerIdx++;
       sellerRemaining = sellerAllocations[sellerIdx]?.correctedFill ?? 0;
     }
-    if (buyerRemaining <= quantityEpsilon) {
+    if (buyerRemaining <= 0) {
       buyerIdx++;
       buyerRemaining = buyerAllocations[buyerIdx]?.correctedFill ?? 0;
     }
