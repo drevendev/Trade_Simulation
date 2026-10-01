@@ -1,7 +1,7 @@
 # Economic Simulation — Project Manifest
 
 Mission  
-Transform https://github.com/drevendev/trade\_simulation into a deep but implementable autonomous economic simulation with no player agency. The simulation must run deterministically/reproducibly in-browser and be understandable through a polished GitHub Pages visualization.
+Transform https\://github.com/drevendev/trade\_simulation into a deep but implementable autonomous economic simulation with no player agency. The simulation must run deterministically/reproducibly in-browser and be understandable through a polished GitHub Pages visualization.
 
 Core product principles  
 1\. Simulation first, game second: no player-controlled economy. Interesting outcomes emerge from interacting agents and institutions.  
