@@ -68,9 +68,36 @@ describe("MarketIntent physical endpoint conformance (#246)", () => {
     },
   );
 
-  it.each(["BUY", "SELL"] as const)("rejects Clan %s for both generic bucket forms", (side) => {
-    it.each([undefined, "GENERAL"] as const);
-  });
+  for (const actor of [state, cohort]) {
+    for (const side of ["BUY", "SELL"] as const) {
+      for (const purpose of ["CONSUMPTION", "INPUT", "INVESTMENT", "PUBLIC_PROCUREMENT", "INVENTORY_REBALANCE"] as const) {
+        it.each(["INPUT", "OUTPUT", "INVESTMENT"] as const)(
+          `rejects ${actor.type} ${side}/${purpose} with non-generic bucket %s`,
+          (bucket) => {
+            expect(() => validateMarketIntent(intent(actor, side, purpose, bucket)))
+              .toThrow(/must use GENERAL inventory bucket/);
+          },
+        );
+      }
+    }
+  }
+
+  for (const purpose of ["CONSUMPTION", "PUBLIC_PROCUREMENT", "INVENTORY_REBALANCE"] as const) {
+    it.each([undefined, "GENERAL"] as const)(
+      `rejects ProductionUnit BUY/${purpose} with missing physical bucket %s`,
+      (bucket) => {
+        expect(() => validateMarketIntent(intent(productionUnit, "BUY", purpose, bucket)))
+          .toThrow(/BUY must use INPUT, OUTPUT, or INVESTMENT bucket/);
+      },
+    );
+    it.each(["INPUT", "OUTPUT", "INVESTMENT"] as const)(
+      `accepts ProductionUnit BUY/${purpose} with physical bucket %s`,
+      (bucket) => {
+        expect(() => validateMarketIntent(intent(productionUnit, "BUY", purpose, bucket)))
+          .not.toThrow();
+      },
+    );
+  }
 
   it.each(["BUY", "SELL"] as const)("rejects MonetaryAuthority %s before settlement", (side) => {
     expect(() => validateMarketIntent(intent(authority, side, "INVENTORY_REBALANCE", "GENERAL")))

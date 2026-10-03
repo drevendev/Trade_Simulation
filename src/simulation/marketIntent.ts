@@ -138,6 +138,14 @@ export function validateMarketIntent(intent: MarketIntent): void {
     }
   }
 
+  // State and Cohort each own one generic goods stock, not a unit's physical buckets.
+  if (
+    (intent.actor.type === "STATE" || intent.actor.type === "COHORT") &&
+    intent.inventoryBucket !== undefined && intent.inventoryBucket !== "GENERAL"
+  ) {
+    throw new Error(`${intent.actor.type} MarketIntent must use GENERAL inventory bucket`);
+  }
+
   // ProductionUnit inventory bucket rules
   if (intent.actor.type === "PRODUCTION_UNIT") {
     if (intent.side === "BUY" && intent.purpose === "INPUT") {
@@ -152,14 +160,14 @@ export function validateMarketIntent(intent: MarketIntent): void {
           `ProductionUnit BUY/INVESTMENT must use INVESTMENT bucket, got ${intent.inventoryBucket}`,
         );
       }
-    } else if (intent.side === "SELL") {
+    } else {
       if (
         intent.inventoryBucket !== "INPUT" &&
         intent.inventoryBucket !== "OUTPUT" &&
         intent.inventoryBucket !== "INVESTMENT"
       ) {
         throw new Error(
-          `ProductionUnit SELL must use INPUT, OUTPUT, or INVESTMENT bucket, got ${intent.inventoryBucket}`,
+          `ProductionUnit ${intent.side} must use INPUT, OUTPUT, or INVESTMENT bucket, got ${intent.inventoryBucket}`,
         );
       }
     }
