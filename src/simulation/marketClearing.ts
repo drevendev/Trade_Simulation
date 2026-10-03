@@ -298,13 +298,18 @@ function twoPointerMatcher(
 
   let sellerIdx = 0;
   let buyerIdx = 0;
-  let sellerRemaining = sellerAllocations[0]?.correctedFill ?? 0;
-  let buyerRemaining = buyerAllocations[0]?.correctedFill ?? 0;
+  let sellerMatched = 0;
+  let buyerMatched = 0;
 
   while (sellerIdx < sellerAllocations.length && buyerIdx < buyerAllocations.length) {
     const sellerData = sellerAllocations[sellerIdx]!;
     const buyerData = buyerAllocations[buyerIdx]!;
 
+    // Reduce emitted quantities in their canonical order, then derive remaining
+    // capacity once. Repeatedly subtracting micro-lots from a large remainder can
+    // lose a whole ULP even when the canonical emitted sum is representable.
+    const sellerRemaining = Math.max(0, sellerData.correctedFill - sellerMatched);
+    const buyerRemaining = Math.max(0, buyerData.correctedFill - buyerMatched);
     const matched = Math.min(sellerRemaining, buyerRemaining);
     if (matched > 0) {
       const seller = sellerData.intent;
@@ -352,20 +357,18 @@ function twoPointerMatcher(
       allocations.push(allocation);
     }
 
-    sellerRemaining -= matched;
-    buyerRemaining -= matched;
+    sellerMatched += matched;
+    buyerMatched += matched;
 
-    // Epsilon belongs to aggregate reconciliation, not to individual lots.
-    // A positive sub-epsilon fill is still real cleared quantity and must settle.
-    // Subtracting the exact matched operand makes at least one remainder exactly zero,
-    // so exact exhaustion advances the pointer without silently discarding micro-lots.
-    if (sellerRemaining <= 0) {
+    // At least one operand of min is exhausted in every iteration. Use that
+    // comparison rather than an epsilon or a separately rounded subtraction.
+    if (matched === sellerRemaining) {
       sellerIdx++;
-      sellerRemaining = sellerAllocations[sellerIdx]?.correctedFill ?? 0;
+      sellerMatched = 0;
     }
-    if (buyerRemaining <= 0) {
+    if (matched === buyerRemaining) {
       buyerIdx++;
-      buyerRemaining = buyerAllocations[buyerIdx]?.correctedFill ?? 0;
+      buyerMatched = 0;
     }
   }
 
