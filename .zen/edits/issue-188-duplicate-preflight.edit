@@ -1,0 +1,70 @@
+### FILE: src/simulation/phase1JurisdictionTransition.ts
+<<<<<<< FIND
+  for (const change of dueChanges) {
+    if (dueByRegion.has(change.regionId)) {
+      throw new Error(
+        `Duplicate Phase-1 jurisdiction change for Region ${String(change.regionId)} at tick ${currentTick}`,
+      );
+    }
+    if (!world.regions.has(change.regionId)) {
+=======
+  // Check shape of the complete due set before inspecting payload references.
+  // Equal Region keys otherwise retain insertion order and change error precedence.
+  for (let index = 1; index < dueChanges.length; index += 1) {
+    const change = dueChanges[index]!;
+    if (change.regionId === dueChanges[index - 1]!.regionId) {
+      throw new Error(
+        `Duplicate Phase-1 jurisdiction change for Region ${String(change.regionId)} at tick ${currentTick}`,
+      );
+    }
+  }
+  for (const change of dueChanges) {
+    if (!world.regions.has(change.regionId)) {
+>>>>>>> REPLACE
+### FILE: src/simulation/phase1JurisdictionTransition.test.ts
+<<<<<<< FIND
+  it("rejects duplicate same-tick changes for one Region independent of insertion order", () => {
+=======
+  it("reports duplicates before missing payload references in both insertion orders", () => {
+    const opening = baselineWorld();
+    const region = [...opening.regions.values()][0]!;
+    const changes = [
+      { regionId: region.regionId, nextControllerStateId: "s:missing" as StateId, activateTick: 7 },
+      { regionId: region.regionId, nextControllerStateId: null, activateTick: 7 },
+    ] as const;
+    for (const jurisdictionChanges of [changes, [...changes].reverse()]) {
+      const world: WorldState = {
+        ...opening,
+        pendingTransitions: { ...opening.pendingTransitions, jurisdictionChanges },
+      };
+      const expected = `Duplicate Phase-1 jurisdiction change for Region ${String(region.regionId)} at tick 7`;
+      expect(() => resolveEffectiveJurisdictionAtPhase1(world, 7)).toThrow(expected);
+      expect(() => applyJurisdictionTransitionsAtPhase1(world, 7)).toThrow(expected);
+      expect(world.regions).toBe(opening.regions);
+      expect(world.pendingTransitions.jurisdictionChanges).toEqual(jurisdictionChanges);
+    }
+  });
+
+  it.each([
+    [Number.NaN, /Invalid Phase-1 jurisdiction change/],
+    [6, /Stale Phase-1 jurisdiction change/],
+  ] as const)("preserves tick-error precedence over duplicates for activation %s", (activateTick, error) => {
+    const opening = baselineWorld();
+    const region = [...opening.regions.values()][0]!;
+    const changes = [
+      { regionId: region.regionId, nextControllerStateId: null, activateTick: 7 },
+      { regionId: region.regionId, nextControllerStateId: "s:missing" as StateId, activateTick: 7 },
+      { regionId: region.regionId, nextControllerStateId: null, activateTick },
+    ];
+    for (const jurisdictionChanges of [changes, [...changes].reverse()]) {
+      const world: WorldState = {
+        ...opening,
+        pendingTransitions: { ...opening.pendingTransitions, jurisdictionChanges },
+      };
+      expect(() => resolveEffectiveJurisdictionAtPhase1(world, 7)).toThrow(error);
+      expect(() => applyJurisdictionTransitionsAtPhase1(world, 7)).toThrow(error);
+    }
+  });
+
+  it("rejects duplicate same-tick changes for one Region independent of insertion order", () => {
+>>>>>>> REPLACE
