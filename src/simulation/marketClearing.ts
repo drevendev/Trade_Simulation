@@ -140,9 +140,11 @@ export function computeLocalClearing(
   quantityEpsilon: number = 1e-8,
   allocationIdCounter: { value: number },
 ): MarketAllocation[] {
-  // Validate inputs
-  const buyerIntents = input.buyerIntents;
-  const sellerIntents = input.sellerIntents;
+  // Canonicalize before callbacks and floating-point reductions, not only before
+  // residual correction: addition order is observable for mixed-magnitude stocks.
+  const intentKey = (intent: MarketIntent): string => `${actorRefKey(intent.actor)}|${intent.id}`;
+  const buyerIntents = stableOrderBy(input.buyerIntents, intentKey);
+  const sellerIntents = stableOrderBy(input.sellerIntents, intentKey);
 
   if (buyerIntents.length === 0 || sellerIntents.length === 0) {
     return [];
@@ -176,13 +178,17 @@ export function computeLocalClearing(
   // Provisional seller allocations: sellerFill_i = Q × sellable_i / Σ sellable
   const provisionalSellerAllocations = sellerData.map((data) => ({
     ...data,
-    provisionalFill: (clearedQuantity * data.sellable) / totalSupply,
+    provisionalFill: clearedQuantity === totalSupply
+      ? data.sellable
+      : (clearedQuantity * data.sellable) / totalSupply,
   }));
 
   // Provisional buyer allocations: buyerFill_j = Q × effectiveDemand_j / Σ effectiveDemand
   const provisionalBuyerAllocations = buyerData.map((data) => ({
     ...data,
-    provisionalFill: (clearedQuantity * data.effectiveDemand) / totalDemand,
+    provisionalFill: clearedQuantity === totalDemand
+      ? data.effectiveDemand
+      : (clearedQuantity * data.effectiveDemand) / totalDemand,
   }));
 
   // Residual correction: use stable ID order (actor ID then intent ID)
