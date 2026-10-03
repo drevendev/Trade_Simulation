@@ -204,6 +204,47 @@ describe("REQ-CORE-005 Phase-1 jurisdiction activation", () => {
     }, 4)).toThrow(/missing State/);
   });
 
+  it("reports duplicates before missing payload references in both insertion orders", () => {
+    const opening = baselineWorld();
+    const region = [...opening.regions.values()][0]!;
+    const changes = [
+      { regionId: region.regionId, nextControllerStateId: "s:missing" as StateId, activateTick: 7 },
+      { regionId: region.regionId, nextControllerStateId: null, activateTick: 7 },
+    ] as const;
+    for (const jurisdictionChanges of [changes, [...changes].reverse()]) {
+      const world: WorldState = {
+        ...opening,
+        pendingTransitions: { ...opening.pendingTransitions, jurisdictionChanges },
+      };
+      const expected = `Duplicate Phase-1 jurisdiction change for Region ${String(region.regionId)} at tick 7`;
+      expect(() => resolveEffectiveJurisdictionAtPhase1(world, 7)).toThrow(expected);
+      expect(() => applyJurisdictionTransitionsAtPhase1(world, 7)).toThrow(expected);
+      expect(world.regions).toBe(opening.regions);
+      expect(world.pendingTransitions.jurisdictionChanges).toEqual(jurisdictionChanges);
+    }
+  });
+
+  it.each([
+    [Number.NaN, /Invalid Phase-1 jurisdiction change/],
+    [6, /Stale Phase-1 jurisdiction change/],
+  ] as const)("preserves tick-error precedence over duplicates for activation %s", (activateTick, error) => {
+    const opening = baselineWorld();
+    const region = [...opening.regions.values()][0]!;
+    const changes = [
+      { regionId: region.regionId, nextControllerStateId: null, activateTick: 7 },
+      { regionId: region.regionId, nextControllerStateId: "s:missing" as StateId, activateTick: 7 },
+      { regionId: region.regionId, nextControllerStateId: null, activateTick },
+    ];
+    for (const jurisdictionChanges of [changes, [...changes].reverse()]) {
+      const world: WorldState = {
+        ...opening,
+        pendingTransitions: { ...opening.pendingTransitions, jurisdictionChanges },
+      };
+      expect(() => resolveEffectiveJurisdictionAtPhase1(world, 7)).toThrow(error);
+      expect(() => applyJurisdictionTransitionsAtPhase1(world, 7)).toThrow(error);
+    }
+  });
+
   it("rejects duplicate same-tick changes for one Region independent of insertion order", () => {
     const opening = baselineWorld();
     const region = [...opening.regions.values()][0]!;

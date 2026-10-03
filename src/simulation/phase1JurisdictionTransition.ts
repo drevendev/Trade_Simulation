@@ -56,12 +56,17 @@ export function resolveEffectiveJurisdictionAtPhase1(
     (change) => String(change.regionId),
   );
 
-  for (const change of dueChanges) {
-    if (dueByRegion.has(change.regionId)) {
+  // Check shape of the complete due set before inspecting payload references.
+  // Equal Region keys otherwise retain insertion order and change error precedence.
+  for (let index = 1; index < dueChanges.length; index += 1) {
+    const change = dueChanges[index]!;
+    if (change.regionId === dueChanges[index - 1]!.regionId) {
       throw new Error(
         `Duplicate Phase-1 jurisdiction change for Region ${String(change.regionId)} at tick ${currentTick}`,
       );
     }
+  }
+  for (const change of dueChanges) {
     if (!world.regions.has(change.regionId)) {
       throw new Error(
         `Phase-1 jurisdiction change references missing Region ${String(change.regionId)}`,
