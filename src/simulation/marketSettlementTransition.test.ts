@@ -19,7 +19,11 @@ import { initializeTickContext } from "./tickOrchestrator";
 import type { TickContext } from "./tickOrchestrator";
 import { createMarketAllocationId, type MarketAllocation } from "./marketClearing";
 import { createMarketIntentId } from "./marketIntent";
-import { executeAllocation, SettlementRefusedError } from "./marketSettlementTransition";
+import {
+  applyActorMoneyDeltas,
+  executeAllocation,
+  SettlementRefusedError,
+} from "./marketSettlementTransition";
 import type { CohortId, CurrencyId, GoodId, ProductionUnitId, StateId } from "../domain/id";
 
 function createTestConfig(): SimulationConfig {
@@ -483,6 +487,73 @@ describe("executeAllocation — live actor stock settlement (Issue #427)", () =>
         }),
         /cannot pay/,
       );
+    });
+
+    it("refuses a sub-epsilon seller overdraw instead of persisting a negative inventory", () => {
+      const world = buildWorld();
+      const { sellerUnitId, buyerCohortId, stateId, currencyId } = pickCounterparties(world);
+      const unit = world.productionUnits.get(sellerUnitId)!;
+      const outputInventory = new Map(unit.outputInventory);
+      outputInventory.set(FOOD, 0);
+      const productionUnits = new Map(world.productionUnits);
+      productionUnits.set(sellerUnitId, { ...unit, outputInventory });
+      const zeroStockWorld: WorldState = { ...world, productionUnits };
+
+      expectRefusal(
+        zeroStockWorld,
+        buildAllocation({
+          seller: { type: "PRODUCTION_UNIT", productionUnitId: sellerUnitId },
+          buyer: { type: "COHORT", cohortId: buyerCohortId },
+          quantity: 5e-10,
+          sellerNetUnitPrice: 1,
+          currencyId,
+          destinationStateId: stateId,
+        }),
+        /cannot release/,
+      );
+    });
+
+    it("refuses a sub-epsilon buyer overdraw instead of persisting a negative wallet", () => {
+      const world = buildWorld();
+      const { sellerUnitId, buyerCohortId, stateId, currencyId } = pickCounterparties(world);
+      const cohort = world.cohorts.get(buyerCohortId)!;
+      const wallet = new Map(cohort.wallet);
+      wallet.set(currencyId, 0);
+      const cohorts = new Map(world.cohorts);
+      cohorts.set(buyerCohortId, { ...cohort, wallet });
+      const zeroWalletWorld: WorldState = { ...world, cohorts };
+
+      expectRefusal(
+        zeroWalletWorld,
+        buildAllocation({
+          seller: { type: "PRODUCTION_UNIT", productionUnitId: sellerUnitId },
+          buyer: { type: "COHORT", cohortId: buyerCohortId },
+          quantity: 5e-10,
+          sellerNetUnitPrice: 1,
+          currencyId,
+          destinationStateId: stateId,
+        }),
+        /cannot pay/,
+      );
+    });
+
+    it("projects same-wallet deltas in commit order so an exact-zero atomic result is accepted", () => {
+      const world = buildWorld();
+      const { buyerCohortId, currencyId } = pickCounterparties(world);
+      const cohort = world.cohorts.get(buyerCohortId)!;
+      const wallet = new Map(cohort.wallet);
+      wallet.set(currencyId, 1e-9);
+      const cohorts = new Map(world.cohorts);
+      cohorts.set(buyerCohortId, { ...cohort, wallet });
+      const tinyWalletWorld: WorldState = { ...world, cohorts };
+      const buyer = { type: "COHORT", cohortId: buyerCohortId } as const;
+
+      const next = applyActorMoneyDeltas(tinyWalletWorld, [
+        { actor: buyer, currencyId, delta: 5e-10 },
+        { actor: buyer, currencyId, delta: -1.5000000000000002e-9 },
+      ]);
+
+      expect(next.cohorts.get(buyerCohortId)!.wallet.get(currencyId)).toBe(0);
     });
 
     it("settles a State's public inventory purchase, the one non-Cohort GENERAL endpoint", () => {
