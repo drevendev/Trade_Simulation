@@ -1,7 +1,7 @@
 # Economic Simulation — Implementation Handoff
 
 Status: FINAL HANDOFF PACKAGE — implementation-ready for Codex/Claude.  
-Implementation base: https://github.com/drevendev/trade\_simulation
+Implementation base: https\://github.com/drevendev/trade\_simulation
 
 Purpose  
 This folder is the self-contained implementation package. A coding agent should be able to implement the target simulation end-to-end without reopening product/economic design or reconstructing Drive history.
