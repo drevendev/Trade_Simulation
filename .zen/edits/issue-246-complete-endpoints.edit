@@ -1,0 +1,78 @@
+### FILE: src/simulation/marketIntent.ts
+<<<<<<< FIND
+  // ProductionUnit inventory bucket rules
+  if (intent.actor.type === "PRODUCTION_UNIT") {
+=======
+  // State and Cohort each own one generic goods stock, not a unit's physical buckets.
+  if (
+    (intent.actor.type === "STATE" || intent.actor.type === "COHORT") &&
+    intent.inventoryBucket !== undefined && intent.inventoryBucket !== "GENERAL"
+  ) {
+    throw new Error(`${intent.actor.type} MarketIntent must use GENERAL inventory bucket`);
+  }
+
+  // ProductionUnit inventory bucket rules
+  if (intent.actor.type === "PRODUCTION_UNIT") {
+>>>>>>> REPLACE
+<<<<<<< FIND
+    } else if (intent.side === "SELL") {
+      if (
+        intent.inventoryBucket !== "INPUT" &&
+        intent.inventoryBucket !== "OUTPUT" &&
+        intent.inventoryBucket !== "INVESTMENT"
+      ) {
+        throw new Error(
+          `ProductionUnit SELL must use INPUT, OUTPUT, or INVESTMENT bucket, got ${intent.inventoryBucket}`,
+        );
+      }
+    }
+=======
+    } else {
+      if (
+        intent.inventoryBucket !== "INPUT" &&
+        intent.inventoryBucket !== "OUTPUT" &&
+        intent.inventoryBucket !== "INVESTMENT"
+      ) {
+        throw new Error(
+          `ProductionUnit ${intent.side} must use INPUT, OUTPUT, or INVESTMENT bucket, got ${intent.inventoryBucket}`,
+        );
+      }
+    }
+>>>>>>> REPLACE
+### FILE: src/simulation/marketIntent.endpoints.test.ts
+<<<<<<< FIND
+  it.each(["BUY", "SELL"] as const)("rejects Clan %s for both generic bucket forms", (side) => {
+    it.each([undefined, "GENERAL"] as const);
+  });
+=======
+  for (const actor of [state, cohort]) {
+    for (const side of ["BUY", "SELL"] as const) {
+      for (const purpose of ["CONSUMPTION", "INPUT", "INVESTMENT", "PUBLIC_PROCUREMENT", "INVENTORY_REBALANCE"] as const) {
+        it.each(["INPUT", "OUTPUT", "INVESTMENT"] as const)(
+          `rejects ${actor.type} ${side}/${purpose} with non-generic bucket %s`,
+          (bucket) => {
+            expect(() => validateMarketIntent(intent(actor, side, purpose, bucket)))
+              .toThrow(/must use GENERAL inventory bucket/);
+          },
+        );
+      }
+    }
+  }
+
+  for (const purpose of ["CONSUMPTION", "PUBLIC_PROCUREMENT", "INVENTORY_REBALANCE"] as const) {
+    it.each([undefined, "GENERAL"] as const)(
+      `rejects ProductionUnit BUY/${purpose} with missing physical bucket %s`,
+      (bucket) => {
+        expect(() => validateMarketIntent(intent(productionUnit, "BUY", purpose, bucket)))
+          .toThrow(/BUY must use INPUT, OUTPUT, or INVESTMENT bucket/);
+      },
+    );
+    it.each(["INPUT", "OUTPUT", "INVESTMENT"] as const)(
+      `accepts ProductionUnit BUY/${purpose} with physical bucket %s`,
+      (bucket) => {
+        expect(() => validateMarketIntent(intent(productionUnit, "BUY", purpose, bucket)))
+          .not.toThrow();
+      },
+    );
+  }
+>>>>>>> REPLACE
