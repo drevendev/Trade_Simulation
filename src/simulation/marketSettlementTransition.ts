@@ -509,55 +509,57 @@ export function applyMarketSettlementTransition(world: WorldState, context: Tick
 }
 
 /**
- * Preflight the debits: no live wallet or inventory may end below zero.
+ * Preflight the atomic transition: no live wallet or inventory may end below zero.
  *
- * Deltas are netted per stock first, so an actor appearing on both sides of one allocation
- * is checked against what it will actually hold, not against one leg in isolation. The
- * configured `quantityEpsilon`/`moneyEpsilon` are the domain zero thresholds, so a residual
- * within epsilon is zero rather than an overdraft.
+ * Project each delta in the exact order the commit loops below will apply it. Do not regroup
+ * the deltas into one arithmetic sum: IEEE-754 addition is not associative, so a separately
+ * netted value can disagree with the actual sequential commit at the zero boundary. Also do
+ * not reject an intermediate negative projection: one atomic bundle may debit and credit the
+ * same stock before its final value is known. The invariant is the final canonical stock after
+ * the complete atomic transition, and any final value < 0 is an overdraft even when its
+ * magnitude is smaller than a configured domain epsilon.
  */
 function assertNoStockGoesNegative(
   world: WorldState,
   goodsDeltas: readonly GoodsDelta[],
   moneyDeltas: readonly MoneyDelta[],
 ): void {
-  const quantityEpsilon = world.simulationConfig.numeric.quantityEpsilon ?? 1e-9;
-  const moneyEpsilon = world.simulationConfig.numeric.moneyEpsilon ?? 1e-9;
-
-  const nettedGoods = new Map<string, { delta: GoodsDelta; net: number }>();
+  const projectedGoods = new Map<string, { delta: GoodsDelta; opening: number; balance: number }>();
   for (const delta of goodsDeltas) {
     const key = goodsDeltaKey(delta);
-    const existing = nettedGoods.get(key);
-    nettedGoods.set(key, { delta, net: (existing?.net ?? 0) + delta.delta });
+    const existing = projectedGoods.get(key);
+    const opening = existing?.opening ?? (readGoods(world, delta.endpoint).get(delta.goodId) ?? 0);
+    const balance = (existing?.balance ?? opening) + delta.delta;
+    projectedGoods.set(key, { delta, opening, balance });
   }
 
-  for (const { delta, net } of nettedGoods.values()) {
-    if (net >= 0) continue;
-    const available = readGoods(world, delta.endpoint).get(delta.goodId) ?? 0;
-    if (available + net < -quantityEpsilon) {
+  for (const { delta, opening, balance } of projectedGoods.values()) {
+    if (balance < 0) {
       refuse(
-        `executeAllocation: ${goodsDeltaKey(delta)} holds ${available} of good ` +
-          `"${delta.goodId}" and cannot release ${-net}. Settlement never drives an inventory ` +
-          `negative (Handoff/04 §10 preflight).`,
+        `executeAllocation: ${goodsDeltaKey(delta)} holds ${opening} of good ` +
+          `"${delta.goodId}" and cannot release the requested atomic net change; final balance ` +
+          `would be ${balance}. Settlement never drives an inventory negative ` +
+          `(Handoff/04 §10 preflight).`,
       );
     }
   }
 
-  const nettedMoney = new Map<string, { delta: MoneyDelta; net: number }>();
+  const projectedMoney = new Map<string, { delta: MoneyDelta; opening: number; balance: number }>();
   for (const delta of moneyDeltas) {
     const key = moneyDeltaKey(delta);
-    const existing = nettedMoney.get(key);
-    nettedMoney.set(key, { delta, net: (existing?.net ?? 0) + delta.delta });
+    const existing = projectedMoney.get(key);
+    const opening = existing?.opening ?? (readWallet(world, delta.endpoint).get(delta.currencyId) ?? 0);
+    const balance = (existing?.balance ?? opening) + delta.delta;
+    projectedMoney.set(key, { delta, opening, balance });
   }
 
-  for (const { delta, net } of nettedMoney.values()) {
-    if (net >= 0) continue;
-    const available = readWallet(world, delta.endpoint).get(delta.currencyId) ?? 0;
-    if (available + net < -moneyEpsilon) {
+  for (const { delta, opening, balance } of projectedMoney.values()) {
+    if (balance < 0) {
       refuse(
-        `executeAllocation: ${moneyDeltaKey(delta)} holds ${available} of currency ` +
-          `"${delta.currencyId}" and cannot pay ${-net}. Settlement never drives a wallet ` +
-          `negative (Handoff/04 §10 preflight).`,
+        `executeAllocation: ${moneyDeltaKey(delta)} holds ${opening} of currency ` +
+          `"${delta.currencyId}" and cannot pay the requested atomic net change; final balance ` +
+          `would be ${balance}. Settlement never drives a wallet negative ` +
+          `(Handoff/04 §10 preflight).`,
       );
     }
   }
