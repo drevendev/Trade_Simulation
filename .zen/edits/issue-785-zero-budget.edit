@@ -1,0 +1,72 @@
+### FILE: src/simulation/phase8MainMarketClearing.ts
+<<<<<<< FIND
+          const maxAffordable = (intent as any).maxSpend
+            ? (intent as any).maxSpend / grossPrice
+            : intent.desiredQuantity;
+=======
+          const maxAffordable = intent.maxSpend === undefined
+            ? intent.desiredQuantity
+            : intent.maxSpend / grossPrice;
+>>>>>>> REPLACE
+### FILE: src/simulation/phase8MainMarketClearing.test.ts
+<<<<<<< FIND
+  it("exempts destination-State PUBLIC_PROCUREMENT before affordability while preserving household tax telemetry", () => {
+=======
+  it.each([
+    "self-procurement",
+    "state-investment",
+    "other-procurement",
+    "cohort-consumption",
+  ] as const)("keeps zero and partial budgets consistent with aggregates for %s", (kind) => {
+    const world = buildWorld();
+    const actors = counterparties(world);
+    const otherStateId = Array.from(world.states.keys()).find((id) => id !== actors.stateId);
+    expect(otherStateId).toBeDefined();
+    const grossPrice = kind === "self-procurement" ? SELLER_NET_PRICE : 10.8;
+
+    for (const collectTelemetry of [false, true]) {
+      for (const maxSpend of [0, 5, 20]) {
+        let intents: MarketIntent[];
+        if (kind === "cohort-consumption") {
+          intents = buildIntents(actors, 1, maxSpend);
+        } else {
+          intents = buildStateBuyerIntents(
+            actors,
+            kind === "state-investment" ? "INVESTMENT" : "PUBLIC_PROCUREMENT",
+            maxSpend,
+          );
+          if (kind === "other-procurement") {
+            intents = intents.map((intent) => intent.side === "BUY"
+              ? { ...intent, actor: { type: "STATE" as const, stateId: otherStateId! } }
+              : intent);
+          }
+        }
+        const result = executeTick(world, 1, world.pendingTransitions, createPhase8Handler({
+          getFixtureIntents: () => intents,
+          getFixtureMarketIds: () => new Map([[actors.regionId, UNSEEDED_MARKET]]),
+          collectTelemetry,
+          taxPolicy: fixtureTaxPolicy,
+        }));
+        expect(result.reconciliationErrors).toBeNull();
+        const expectedQuantity = Math.min(1, maxSpend / grossPrice);
+        const allocations = result.context.marketAllocations;
+        if (maxSpend === 0) {
+          // This must fail against the historical truthiness-based clearing callback.
+          expect(allocations).toHaveLength(0);
+        } else {
+          expect(allocations).toHaveLength(1);
+          expect(allocations[0]!.buyerGrossUnitPrice).toBeCloseTo(grossPrice, 10);
+        }
+        const quantity = allocations.reduce((sum, allocation) => sum + allocation.quantity, 0);
+        expect(quantity).toBeCloseTo(expectedQuantity, 12);
+        const aggregates = Array.from(result.context.marketClearingAggregates.values());
+        expect(aggregates).toHaveLength(1);
+        expect(aggregates[0]!.effectiveDemandQuantity).toBeCloseTo(expectedQuantity, 12);
+        expect(aggregates[0]!.clearedQuantity).toBeCloseTo(expectedQuantity, 12);
+        expect(result.context.marketTelemetry).toHaveLength(collectTelemetry ? 1 : 0);
+      }
+    }
+  });
+
+  it("exempts destination-State PUBLIC_PROCUREMENT before affordability while preserving household tax telemetry", () => {
+>>>>>>> REPLACE
