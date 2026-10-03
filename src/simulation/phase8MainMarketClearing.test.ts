@@ -484,6 +484,124 @@ describe("Phase-8 consumption-tax policy input (REQ-MARKET-004, Issue #481)", ()
       .toBe(5);
   });
 
+  it("shares one State public inventory endpoint across Region/LocalMarket groups and preserves its maximum reserve", () => {
+    const initialWorld = buildWorld();
+    const actors = counterparties(initialWorld);
+    const secondaryRegion = Array.from(initialWorld.regions.values()).find(
+      (region) =>
+        region.regionId !== actors.regionId &&
+        region.controllerStateId === actors.stateId &&
+        region.settlementCurrencyId === actors.currencyId,
+    );
+    expect(secondaryRegion).toBeDefined();
+
+    const secondaryBuyer = Array.from(initialWorld.cohorts.values()).find(
+      (cohort) =>
+        cohort.seed.regionKey === secondaryRegion!.seed.key &&
+        (cohort.wallet.get(actors.currencyId) ?? 0) > 0,
+    );
+    expect(secondaryBuyer).toBeDefined();
+
+    const primaryBuyer = initialWorld.cohorts.get(actors.buyerCohortId)!;
+    const state = initialWorld.states.get(actors.stateId)!;
+    const cohorts = new Map(initialWorld.cohorts);
+    cohorts.set(actors.buyerCohortId, {
+      ...primaryBuyer,
+      wallet: new Map(primaryBuyer.wallet).set(actors.currencyId, 1000),
+    });
+    cohorts.set(secondaryBuyer!.cohortId, {
+      ...secondaryBuyer!,
+      wallet: new Map(secondaryBuyer!.wallet).set(actors.currencyId, 1000),
+    });
+    const boundedWorld: WorldState = {
+      ...initialWorld,
+      states: new Map(initialWorld.states).set(actors.stateId, {
+        ...state,
+        publicInventory: new Map(state.publicInventory).set(FOOD, 5),
+      }),
+      cohorts,
+    };
+
+    const sellerA: MarketIntent = {
+      id: createMarketIntentId("mi:issue-251-cross-group-seller-a"),
+      actor: { type: "STATE", stateId: actors.stateId },
+      regionId: actors.regionId,
+      goodId: FOOD,
+      side: "SELL",
+      purpose: "INVENTORY_REBALANCE",
+      desiredQuantity: 2,
+      minimumReserveQuantity: 3,
+      sourcePlanId: "plan:issue-251-cross-group-supply-a",
+    };
+    const sellerB: MarketIntent = {
+      ...sellerA,
+      id: createMarketIntentId("mi:issue-251-cross-group-seller-b"),
+      regionId: secondaryRegion!.regionId,
+      sourcePlanId: "plan:issue-251-cross-group-supply-b",
+    };
+    const buyerA: MarketIntent = {
+      id: createMarketIntentId("mi:issue-251-cross-group-buyer-a"),
+      actor: { type: "COHORT", cohortId: actors.buyerCohortId },
+      regionId: actors.regionId,
+      goodId: FOOD,
+      side: "BUY",
+      purpose: "CONSUMPTION",
+      desiredQuantity: 2,
+      maxSpend: 100,
+      sourcePlanId: "plan:issue-251-cross-group-demand-a",
+    };
+    const buyerB: MarketIntent = {
+      ...buyerA,
+      id: createMarketIntentId("mi:issue-251-cross-group-buyer-b"),
+      actor: { type: "COHORT", cohortId: secondaryBuyer!.cohortId },
+      regionId: secondaryRegion!.regionId,
+      sourcePlanId: "plan:issue-251-cross-group-demand-b",
+    };
+    const marketIds = new Map<string, MarketId>([
+      [actors.regionId, liveMarketId(boundedWorld, actors.regionId)],
+      [secondaryRegion!.regionId, liveMarketId(boundedWorld, secondaryRegion!.regionId)],
+    ]);
+    const intents = [sellerB, buyerB, sellerA, buyerA];
+    const run = (orderedIntents: MarketIntent[]) =>
+      executeTick(
+        boundedWorld,
+        1,
+        boundedWorld.pendingTransitions,
+        createPhase8Handler({
+          getFixtureIntents: () => orderedIntents,
+          getFixtureMarketIds: () => marketIds,
+          collectTelemetry: true,
+          taxPolicy: fixtureTaxPolicy,
+        }),
+      );
+
+    const forward = run(intents);
+    const reversed = run([...intents].reverse());
+    expect(forward.reconciliationErrors).toBeNull();
+    expect(reversed.reconciliationErrors).toBeNull();
+    expect(reversed.context.marketAllocations).toEqual(forward.context.marketAllocations);
+    expect(reversed.context.marketTelemetry).toEqual(forward.context.marketTelemetry);
+    expect(Array.from(reversed.context.marketClearingAggregates.entries())).toEqual(
+      Array.from(forward.context.marketClearingAggregates.entries()),
+    );
+
+    const totalAllocated = forward.context.marketAllocations.reduce(
+      (sum, allocation) => sum + allocation.quantity,
+      0,
+    );
+    expect(totalAllocated).toBeCloseTo(2, 10);
+    expect(
+      Array.from(forward.context.marketClearingAggregates.values()).reduce(
+        (sum, aggregate) => sum + aggregate.offeredQuantity,
+        0,
+      ),
+    ).toBeCloseTo(2, 10);
+
+    const settled = applyMarketSettlementTransition(boundedWorld, forward.context);
+    expect(settled.states.get(actors.stateId)!.publicInventory.get(FOOD)).toBeCloseTo(3, 10);
+    expect(boundedWorld.states.get(actors.stateId)!.publicInventory.get(FOOD)).toBe(5);
+  });
+
   it.each(["INPUT" as const, "INVESTMENT" as const])(
     "does not apply an OUTPUT reserve to a distinct %s inventory",
     (otherBucket) => {

@@ -213,6 +213,51 @@ export const createPhase8Handler = (options?: {
     const newAggregates = new Map(context.marketClearingAggregates);
     const allocationIdCounter = { value: 0 };
 
+    // Seller reserve/commitment authority is physical-endpoint global, not local-market
+    // group state. Build the strictest reserve from every valid SELL declaration first,
+    // then consume capacity only for sellers whose group has both sides and can actually
+    // clear this phase. This preserves a reserve declared in an otherwise inactive group
+    // without letting that inactive seller consume sellable capacity needed elsewhere.
+    const sellerEndpointKey = (seller: MarketIntent): string =>
+      `${actorRefKey(seller.actor)}|${seller.inventoryBucket ?? "GENERAL"}|${seller.goodId}`;
+    const allSellers = stableOrderBy(
+      intents.filter((intent) => intent.side === "SELL"),
+      (intent) => `${actorRefKey(intent.actor)}|${intent.id}`,
+    );
+    const reserveByEndpoint = new Map<string, number>();
+    for (const seller of allSellers) {
+      const endpoint = sellerEndpointKey(seller);
+      reserveByEndpoint.set(
+        endpoint,
+        Math.max(reserveByEndpoint.get(endpoint) ?? 0, seller.minimumReserveQuantity ?? 0),
+      );
+    }
+
+    const activeSellerIds = new Set<string>();
+    for (const group of intentsByMarketGoodPass.values()) {
+      if (group.buyers.length === 0 || group.sellers.length === 0) continue;
+      for (const seller of group.sellers) activeSellerIds.add(seller.id);
+    }
+
+    const sellerCommitments = new Map<string, number>();
+    const sellableByIntent = new Map<string, number>();
+    for (const seller of allSellers) {
+      if (!activeSellerIds.has(seller.id)) continue;
+      const inventoryBucket = seller.inventoryBucket ?? "GENERAL";
+      const inventory = readMarketActorInventory(world, seller.actor, inventoryBucket, "seller");
+      const ownedQuantity = inventory.get(seller.goodId as GoodId) ?? 0;
+      const endpoint = sellerEndpointKey(seller);
+      const alreadyCommitted = sellerCommitments.get(endpoint) ?? 0;
+      const sellable = computeSellableQuantity(
+        seller,
+        ownedQuantity,
+        reserveByEndpoint.get(endpoint) ?? 0,
+        alreadyCommitted,
+      );
+      sellerCommitments.set(endpoint, alreadyCommitted + sellable);
+      sellableByIntent.set(seller.id, sellable);
+    }
+
     for (const [, group] of stableOrderBy(intentsByMarketGoodPass.entries(), ([key]) => key)) {
       if (group.buyers.length === 0 || group.sellers.length === 0) {
         continue;
@@ -276,48 +321,12 @@ export const createPhase8Handler = (options?: {
       // uncollected part and break MTFX-I2, which `preflightMarketSettlement` checks.
       const grossPriceFactor = 1 + assessedTaxRate * collectionEfficiency;
 
-      // Section 7 sellable authority comes from live actor stock, not requested quantity.
-      // Multiple SELL intents that name the same physical actor/good/bucket share one
-      // commitment balance. Evaluate them in stable actor+intent order so insertion order
-      // cannot decide which duplicate intent consumes the scarce stock first.
+      // Feed the globally precomputed physical-endpoint capacities to this local clearing
+      // group. Stable actor+intent order remains the per-group matching order as well.
       const orderedSellers = stableOrderBy(
         group.sellers,
         (intent) => `${actorRefKey(intent.actor)}|${intent.id}`,
       );
-      const sellerEndpointKey = (seller: MarketIntent): string =>
-        `${actorRefKey(seller.actor)}|${seller.inventoryBucket ?? "GENERAL"}|${group.goodId}`;
-      // A reserve protects physical inventory, not one intent. Read every declaration
-      // before consuming capacity so a later stricter reserve cannot arrive too late.
-      const reserveByEndpoint = new Map<string, number>();
-      for (const seller of orderedSellers) {
-        const endpoint = sellerEndpointKey(seller);
-        reserveByEndpoint.set(
-          endpoint,
-          Math.max(reserveByEndpoint.get(endpoint) ?? 0, seller.minimumReserveQuantity ?? 0),
-        );
-      }
-      const sellerCommitments = new Map<string, number>();
-      const sellableByIntent = new Map<string, number>();
-      for (const seller of orderedSellers) {
-        const inventoryBucket = seller.inventoryBucket ?? "GENERAL";
-        const inventory = readMarketActorInventory(
-          world,
-          seller.actor,
-          inventoryBucket,
-          "seller",
-        );
-        const ownedQuantity = inventory.get(group.goodId as GoodId) ?? 0;
-        const commitmentKey = sellerEndpointKey(seller);
-        const alreadyCommitted = sellerCommitments.get(commitmentKey) ?? 0;
-        const sellable = computeSellableQuantity(
-          seller,
-          ownedQuantity,
-          reserveByEndpoint.get(commitmentKey) ?? 0,
-          alreadyCommitted,
-        );
-        sellerCommitments.set(commitmentKey, alreadyCommitted + sellable);
-        sellableByIntent.set(seller.id, sellable);
-      }
 
       // Create clearing input with production computations
       const clearingInput: LocalClearingInput = {
@@ -374,8 +383,8 @@ export const createPhase8Handler = (options?: {
       // because the authoritative post-tick MarketExpectationState transition
       // (Handoff/04 section 9) must not depend on the non-authoritative telemetry
       // toggle (REQ-MARKET-005).
-      const totalSellerOffered = Array.from(sellableByIntent.values()).reduce(
-        (sum, sellable) => sum + sellable,
+      const totalSellerOffered = orderedSellers.reduce(
+        (sum, seller) => sum + (sellableByIntent.get(seller.id) ?? 0),
         0,
       );
       const grossPrice = marketPrice * grossPriceFactor;
