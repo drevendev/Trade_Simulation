@@ -1,0 +1,78 @@
+### FILE: src/simulation/marketClearing.ts
+<<<<<<< FIND
+  // Validate inputs
+  const buyerIntents = input.buyerIntents;
+  const sellerIntents = input.sellerIntents;
+=======
+  // Canonicalize before callbacks and floating-point reductions, not only before
+  // residual correction: addition order is observable for mixed-magnitude stocks.
+  const intentKey = (intent: MarketIntent): string => `${actorRefKey(intent.actor)}|${intent.id}`;
+  const buyerIntents = stableOrderBy(input.buyerIntents, intentKey);
+  const sellerIntents = stableOrderBy(input.sellerIntents, intentKey);
+>>>>>>> REPLACE
+<<<<<<< FIND
+    provisionalFill: (clearedQuantity * data.sellable) / totalSupply,
+=======
+    provisionalFill: clearedQuantity === totalSupply
+      ? data.sellable
+      : (clearedQuantity * data.sellable) / totalSupply,
+>>>>>>> REPLACE
+<<<<<<< FIND
+    provisionalFill: (clearedQuantity * data.effectiveDemand) / totalDemand,
+=======
+    provisionalFill: clearedQuantity === totalDemand
+      ? data.effectiveDemand
+      : (clearedQuantity * data.effectiveDemand) / totalDemand,
+>>>>>>> REPLACE
+### FILE: src/simulation/marketClearing.residualCorrection.test.ts
+<<<<<<< FIND
+describe("REQ-MARKET-003 residual correction", () => {
+=======
+function permutations<T>(items: readonly T[]): T[][] {
+  if (items.length === 0) return [[]];
+  return items.flatMap((item, index) => permutations(items.filter((_, i) => i !== index))
+    .map((rest) => [item, ...rest]));
+}
+
+describe("REQ-MARKET-003 residual correction", () => {
+  it.each(["BUY", "SELL"] as const)(
+    "keeps mixed-magnitude saturated %s allocations identical across all 24 permutations",
+    (side) => {
+      const capacities = [128815828.07405503, 0.000003986101270010248, 765.5404474851422, 9.685900454960775e-11];
+      const many: MarketIntent[] = capacities.map((quantity, index) => ({
+        id: createMarketIntentId(`mi:permutation-${index}`),
+        // Canonical actor order deliberately reverses the original accumulation order.
+        actor: { type: "STATE" as const, stateId: `s:permutation-${3 - index}` as StateId },
+        regionId, goodId, side,
+        purpose: side === "BUY" ? "PUBLIC_PROCUREMENT" as const : "INVENTORY_REBALANCE" as const,
+        desiredQuantity: quantity,
+        ...(side === "BUY" ? { maxSpend: quantity } : {}),
+        sourcePlanId: `plan:permutation-${index}`,
+      }));
+      const canonicalTotal = [...capacities].reverse().reduce((sum, value) => sum + value, 0);
+      const opposite: MarketIntent = {
+        id: createMarketIntentId("mi:permutation-opposite"),
+        actor: { type: "STATE", stateId }, regionId, goodId,
+        side: side === "BUY" ? "SELL" : "BUY",
+        purpose: "INVENTORY_REBALANCE", desiredQuantity: canonicalTotal * 2,
+        ...(side === "SELL" ? { maxSpend: canonicalTotal * 2 } : {}),
+        sourcePlanId: "plan:permutation-opposite",
+      };
+      const run = (ordered: MarketIntent[]) => computeLocalClearing(
+        input(side === "BUY" ? ordered : [opposite], side === "SELL" ? ordered : [opposite], new Map(), new Map()),
+        new Map(), 1, 1e-8, { value: 0 },
+      );
+      const expected = run([...many].reverse());
+      expect(expected.length).toBeGreaterThan(0);
+      expect(Math.abs(expected.reduce((sum, allocation) => sum + allocation.quantity, 0) - canonicalTotal))
+        .toBeLessThanOrEqual(1e-8);
+      const allOrders = permutations(many);
+      expect(allOrders).toHaveLength(24);
+      for (const ordered of allOrders) {
+        const originalOrder = ordered.map((intent) => intent.id);
+        expect(run(ordered)).toEqual(expected);
+        expect(ordered.map((intent) => intent.id)).toEqual(originalOrder);
+      }
+    },
+  );
+>>>>>>> REPLACE
