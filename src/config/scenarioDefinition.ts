@@ -35,7 +35,10 @@ export interface TransportLinkSeed {
   readonly baseCapacity: number;
   readonly condition: number;
   readonly baseTransportCost: number;
+  /** Link-specific travel time; falls back to TradeConfig.defaultTransitTicksPerLink. */
   readonly transitTicks?: number;
+  /** Optional explicit routine physical attrition; falls back to the configured zero baseline. */
+  readonly routinePhysicalLossRate?: number;
   readonly feeReceiverStateKey?: string | null;
 }
 
