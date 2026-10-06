@@ -205,11 +205,35 @@ export const createPhase8Handler = (options?: {
       );
 
       // Handoff/04 section 2: buyerGrossUnitPrice = sellerNet + collectedTaxPerUnit, and
-      // collectedTaxPerUnit = sellerNet x rate x collectionEfficiency. Only *collected* tax
-      // is ever debited; assessed-but-uncollected tax stays with the buyer and is telemetry
-      // only. Dropping the efficiency factor here would overcharge the buyer by exactly the
-      // uncollected part and break MTFX-I2, which `preflightMarketSettlement` checks.
-      const grossPriceFactor = 1 + assessedTaxRate * collectionEfficiency;
+      // collectedTaxPerUnit = sellerNet x rate x collectionEfficiency. Destination-State
+      // PUBLIC_PROCUREMENT is explicitly self-procurement: keep the destination identity for
+      // audit/settlement, but exempt the buyer before affordability so a treasury cannot ration
+      // its own purchase on a tax that would merely return to that same treasury.
+      const taxationForBuyer = (intent: MarketIntent) => {
+        const isDestinationStateSelfProcurement =
+          destinationStateId !== null &&
+          intent.side === "BUY" &&
+          intent.actor.type === "STATE" &&
+          intent.actor.stateId === destinationStateId &&
+          intent.purpose === "PUBLIC_PROCUREMENT";
+
+        return isDestinationStateSelfProcurement
+          ? {
+              destinationStateId,
+              assessedTaxRate: 0,
+              collectionEfficiency: 0,
+            }
+          : {
+              destinationStateId,
+              assessedTaxRate,
+              collectionEfficiency,
+            };
+      };
+      const grossUnitPriceForBuyer = (intent: MarketIntent, sellerNetPrice: number) => {
+        const facts = taxationForBuyer(intent);
+        return sellerNetPrice * (1 + facts.assessedTaxRate * facts.collectionEfficiency);
+      };
+      const householdGrossPrice = marketPrice * (1 + assessedTaxRate * collectionEfficiency);
 
       // Create clearing input with production computations
       const clearingInput: LocalClearingInput = {
@@ -223,9 +247,9 @@ export const createPhase8Handler = (options?: {
         computeEffectiveDemand: (intent, grossPrice) => {
           if (intent.side !== "BUY") return 0;
           // Effective demand: min of desired quantity and maxSpend / grossPrice
-          const maxAffordable = (intent as any).maxSpend
-            ? (intent as any).maxSpend / grossPrice
-            : intent.desiredQuantity;
+          const maxAffordable = intent.maxSpend === undefined
+            ? intent.desiredQuantity
+            : intent.maxSpend / grossPrice;
           return Math.min(intent.desiredQuantity, Math.max(0, maxAffordable));
         },
         computeSellableQuantity: (intent) => {
@@ -233,17 +257,9 @@ export const createPhase8Handler = (options?: {
           // For M3 fixtures, assume all desired quantity is available
           return intent.desiredQuantity;
         },
-        computeGrossUnitPrice: (_intent, sellerNetPrice) => {
-          // Apply collected consumption tax to get the household gross price
-          return sellerNetPrice * grossPriceFactor;
-        },
-        getTaxationInfo: (_buyer, _regionId, _good) => {
-          return {
-            destinationStateId,
-            assessedTaxRate,
-            collectionEfficiency,
-          };
-        },
+        computeGrossUnitPrice: (intent, sellerNetPrice) =>
+          grossUnitPriceForBuyer(intent, sellerNetPrice),
+        getTaxationInfo: (buyer) => taxationForBuyer(buyer),
       };
 
       // Execute production clearing algorithm. This runs identically regardless
@@ -263,11 +279,15 @@ export const createPhase8Handler = (options?: {
       // (Handoff/04 section 9) must not depend on the non-authoritative telemetry
       // toggle (REQ-MARKET-005).
       const totalSellerOffered = group.sellers.reduce((sum, i) => sum + i.desiredQuantity, 0);
-      const grossPrice = marketPrice * grossPriceFactor;
       let totalBuyerEffective = 0;
       for (const buyer of group.buyers) {
-        const buyerMaxSpend = (buyer as any).maxSpend ?? (buyer.desiredQuantity * grossPrice);
-        totalBuyerEffective += Math.min(buyer.desiredQuantity, buyerMaxSpend / grossPrice);
+        const buyerGrossPrice = grossUnitPriceForBuyer(buyer, marketPrice);
+        const buyerMaxSpend =
+          (buyer as any).maxSpend ?? (buyer.desiredQuantity * buyerGrossPrice);
+        totalBuyerEffective += Math.min(
+          buyer.desiredQuantity,
+          buyerMaxSpend / buyerGrossPrice,
+        );
       }
       const totalCleared = allocations.reduce((sum, a) => sum + a.quantity, 0);
 
@@ -300,7 +320,7 @@ export const createPhase8Handler = (options?: {
         totalCleared,
       );
 
-      builder.setPrices(marketPrice, grossPrice);
+      builder.setPrices(marketPrice, householdGrossPrice);
       builder.addConsumptionTax(totalTaxCollected);
 
       newTelemetry.push(builder.build());
