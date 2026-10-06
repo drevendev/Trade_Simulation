@@ -28,6 +28,12 @@ export interface GoodDefinition {
   /** Initialization/diagnostics only — never an equilibrium anchor. */
   readonly referencePrice: number;
   readonly tradable: boolean;
+  /**
+   * Cargo-capacity units consumed by one physical unit in M5 transport.
+   * Required and strictly positive for every tradable good in a world with active
+   * TransportLinks; optional only so no-trade M0-M4/manual fixtures stay representable.
+   */
+  readonly cargoWeightPerUnit?: number;
   readonly capitalInfrastructureEligibilityTags?: readonly string[];
 }
 
