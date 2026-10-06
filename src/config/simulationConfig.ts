@@ -36,8 +36,27 @@ export interface MarketConfig {
   readonly expectationAlpha?: number;
 }
 
-/** Concrete fields land with the trade/FX requirement that owns them (section 5). */
-export interface TradeConfig {}
+/**
+ * M5 transport/trade/FX configuration (REQ-CONFIG-008 / REQ-CONFIG-009).
+ *
+ * Baseline values are owned by Handoff/03 section 5. Link-specific route topology,
+ * fee receivers and optional ordinary attrition remain ScenarioDefinition data;
+ * pair-specific base/quote direction and opening FX reserves remain FxPoolSeed data.
+ */
+export interface TradeConfig {
+  readonly transportCapacityUtilizationTarget?: number;
+  readonly transportConditionMinimum?: number;
+  readonly shipmentMinimumQuantity?: number;
+  readonly tradeOpportunityMinimumMarginShare?: number;
+  readonly tradeOpportunityMaximumRoutesPerGoodPerRegion?: number;
+  readonly maxExportShareOfAvailableSurplus?: number;
+  readonly defaultTransitTicksPerLink?: number;
+  readonly shipmentLossFromOrdinaryTrade?: number;
+  readonly fxReservationSafetyShare?: number;
+  readonly fxRateAdjustmentSpeed?: number;
+  readonly fxMaxAbsoluteLogMovePerTick?: number;
+  readonly fxMinimumPoolReserve?: number;
+}
 
 /**
  * M4 production and capital controls (REQ-CONFIG-006).
@@ -330,7 +349,21 @@ export function createDefaultSimulationConfig(): SimulationConfig {
       targetInventoryCoverageTicks: 1.0,
       expectationAlpha: 0.25,
     },
-    trade: {},
+    // Handoff/03 section 5: canonical M5 transport/trade/FX baseline.
+    trade: {
+      transportCapacityUtilizationTarget: 0.8,
+      transportConditionMinimum: 0.05,
+      shipmentMinimumQuantity: 1e-6,
+      tradeOpportunityMinimumMarginShare: 0.03,
+      tradeOpportunityMaximumRoutesPerGoodPerRegion: 4,
+      maxExportShareOfAvailableSurplus: 0.5,
+      defaultTransitTicksPerLink: 1,
+      shipmentLossFromOrdinaryTrade: 0,
+      fxReservationSafetyShare: 0.02,
+      fxRateAdjustmentSpeed: 0.08,
+      fxMaxAbsoluteLogMovePerTick: 0.12,
+      fxMinimumPoolReserve: 1e-6,
+    },
     // Handoff/03 section 6 "Production defaults", completed by HANDOFF-REPAIR-M4-002.
     production: {
       baseTargetUtilization: 0.7,
