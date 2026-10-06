@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ClanId, CohortId, CurrencyId, GoodId, MarketId, RegionId, StateId } from "../domain/id";
-import { computeLocalClearing, type LocalClearingInput } from "./marketClearing";
+import {
+  computeLocalClearing,
+  createMarketAllocationId,
+  type LocalClearingInput,
+} from "./marketClearing";
 import { createMarketIntentId, type MarketIntent } from "./marketIntent";
 
 const regionId = "r:residual" as RegionId;
@@ -132,6 +136,82 @@ describe("REQ-MARKET-003 residual correction", () => {
       [sellerA.id, buyerA.id],
       [sellerB.id, buyerB.id],
     ]);
+  });
+
+  it("keeps speculative stabilization free of taxation and allocation-ID side effects", () => {
+    const capacities = [
+      128815828.07405503,
+      0.000003986101270010248,
+      765.5404474851422,
+      9.685900454960775e-11,
+    ];
+    const buyers: MarketIntent[] = capacities.map((quantity, index) => ({
+      id: createMarketIntentId(`mi:side-effect-buyer-${index}`),
+      actor: { type: "STATE" as const, stateId: `s:side-effect-${3 - index}` as StateId },
+      regionId,
+      goodId,
+      side: "BUY" as const,
+      purpose: "PUBLIC_PROCUREMENT" as const,
+      desiredQuantity: quantity,
+      maxSpend: quantity,
+      sourcePlanId: `plan:side-effect-${index}`,
+    }));
+    const canonicalTotal = [...capacities].reverse().reduce((sum, value) => sum + value, 0);
+    const seller: MarketIntent = {
+      id: createMarketIntentId("mi:side-effect-seller"),
+      actor: { type: "STATE", stateId },
+      regionId,
+      goodId,
+      side: "SELL",
+      purpose: "INVENTORY_REBALANCE",
+      desiredQuantity: canonicalTotal * 2,
+      sourcePlanId: "plan:side-effect-seller",
+    };
+
+    let taxationCalls = 0;
+    const baseInput = input(
+      buyers,
+      [seller],
+      new Map(buyers.map((buyer) => [buyer.id, buyer.desiredQuantity])),
+      new Map([[seller.id, seller.desiredQuantity]]),
+    );
+    const counter = { value: 40 };
+    const allocations = computeLocalClearing(
+      {
+        ...baseInput,
+        getTaxationInfo: (buyer) => {
+          taxationCalls++;
+          expect(buyer.side).toBe("BUY");
+          return {
+            destinationStateId: stateId,
+            assessedTaxRate: 0,
+            collectionEfficiency: 1,
+          };
+        },
+      },
+      new Map(),
+      1,
+      1e-8,
+      counter,
+    );
+
+    expect(allocations).toHaveLength(4);
+    expect(taxationCalls).toBe(allocations.length);
+    expect(counter.value).toBe(44);
+    expect(allocations.map((allocation) => allocation.id)).toEqual([
+      createMarketAllocationId("ma:m:residual/good:residual/MAIN/41"),
+      createMarketAllocationId("ma:m:residual/good:residual/MAIN/42"),
+      createMarketAllocationId("ma:m:residual/good:residual/MAIN/43"),
+      createMarketAllocationId("ma:m:residual/good:residual/MAIN/44"),
+    ]);
+    expect(
+      Math.abs(
+        allocations.reduce((sum, allocation) => sum + allocation.quantity, 0) - canonicalTotal,
+      ),
+    ).toBeLessThanOrEqual(1e-8);
+    expect(
+      allocations.some((allocation) => allocation.quantity === 9.685900454960775e-11),
+    ).toBe(true);
   });
 
   it("uses canonical Cohort actor order before intent ID", () => {
