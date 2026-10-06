@@ -68,7 +68,7 @@ export interface LocalClearingInput {
   readonly computeEffectiveDemand: (intent: MarketIntent, marketPrice: number) => number;
   readonly computeSellableQuantity: (intent: MarketIntent, commitmentLedger: Map<string, number>) => number;
   readonly computeGrossUnitPrice: (intent: MarketIntent, sellerNetPrice: number) => number;
-  readonly getTaxationInfo: (buyer: ActorRef, regionId: RegionId, good: GoodId) => {
+  readonly getTaxationInfo: (buyer: MarketIntent, regionId: RegionId, good: GoodId) => {
     destinationStateId: StateId | null;
     assessedTaxRate: number;
     collectionEfficiency: number;
@@ -297,7 +297,7 @@ function twoPointerMatcher(
 
       // Get taxation info for this buyer in this destination region
       const taxInfo = input.getTaxationInfo(
-        buyer.actor,
+        buyer,
         buyer.regionId,
         input.goodId,
       );
