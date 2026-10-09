@@ -13,14 +13,21 @@
  * runs produce identical canonical stocks, allocations, and replay hash.
  */
 
-import type { MarketId, GoodId, RegionId, CurrencyId, StateId } from "../domain/id";
+import type { MarketId, GoodId, RegionId, StateId } from "../domain/id";
+import { actorRefKey } from "../domain/genesisLedger";
+import { stableOrderBy } from "../domain/ordering";
 import type { WorldState } from "./worldState";
 import type { TickContext, PhaseHandler } from "./tickOrchestrator";
 import type { PendingTransitions } from "./worldState";
 import type { MarketIntent } from "./marketIntent";
 import { LocalMarketTelemetryBuilder } from "./marketTelemetry";
-import { computeLocalClearing, type LocalClearingInput } from "./marketClearing";
+import {
+  computeLocalClearing,
+  computeSellableQuantity,
+  type LocalClearingInput,
+} from "./marketClearing";
 import type { TaxPolicyProvider } from "./marketSettlement";
+import { readMarketActorInventory } from "./marketSettlementTransition";
 import { marketPriceKey } from "./phase6MarketPriceFormation";
 
 /**
@@ -130,10 +137,12 @@ export const createPhase8Handler = (options?: {
     }
 
     const intents = getFixtureIntents(world, context);
-    const marketIds = getFixtureMarketIds?.(world) ?? new Map();
+    const fixtureMarketIds = getFixtureMarketIds?.(world);
     const quantityEpsilon = world.simulationConfig.numeric.quantityEpsilon ?? 1e-9;
 
-    // Group intents by market/good/pass
+    // Group intents by canonical live Region/LocalMarket/good/pass identity. A fixture may
+    // name the intended live market explicitly, but it may not invent one: Handoff/04
+    // binds local clearing to the LocalMarket owned by the intent Region.
     const intentsByMarketGoodPass = new Map<string, {
       buyers: MarketIntent[];
       sellers: MarketIntent[];
@@ -143,8 +152,42 @@ export const createPhase8Handler = (options?: {
     }>();
 
     for (const intent of intents) {
-      const marketId = marketIds.get(intent.regionId) || ("market:1" as MarketId);
-      const key = `${marketId}|${intent.goodId}|MAIN`;
+      const region = world.regions.get(intent.regionId as RegionId);
+      if (region === undefined) {
+        throw new Error(`Phase-8 intent ${intent.id} references missing Region ${intent.regionId}`);
+      }
+
+      const fixtureMarketId = fixtureMarketIds?.get(intent.regionId);
+      let marketId: MarketId;
+      if (fixtureMarketId !== undefined) {
+        const fixtureMarket = world.markets.get(fixtureMarketId);
+        if (fixtureMarket === undefined) {
+          throw new Error(
+            `Phase-8 fixture maps Region ${intent.regionId} to missing LocalMarket ${fixtureMarketId}`,
+          );
+        }
+        if (fixtureMarket.seed.regionKey !== region.seed.key) {
+          throw new Error(
+            `Phase-8 LocalMarket ${fixtureMarketId} does not belong to Region ${intent.regionId}`,
+          );
+        }
+        marketId = fixtureMarketId;
+      } else {
+        const matchingMarkets = stableOrderBy(
+          Array.from(world.markets.values()).filter(
+            (market) => market.seed.regionKey === region.seed.key,
+          ),
+          (market) => market.marketId,
+        );
+        if (matchingMarkets.length !== 1) {
+          throw new Error(
+            `Phase-8 Region ${intent.regionId} must resolve to exactly one live LocalMarket; found ${matchingMarkets.length}`,
+          );
+        }
+        marketId = matchingMarkets[0]!.marketId;
+      }
+
+      const key = `${intent.regionId}|${marketId}|${intent.goodId}|MAIN`;
 
       if (!intentsByMarketGoodPass.has(key)) {
         intentsByMarketGoodPass.set(key, {
@@ -170,20 +213,74 @@ export const createPhase8Handler = (options?: {
     const newAggregates = new Map(context.marketClearingAggregates);
     const allocationIdCounter = { value: 0 };
 
+    // Seller reserve/commitment authority is physical-endpoint global, not local-market
+    // group state. Build the strictest reserve from every valid SELL declaration first,
+    // then consume capacity only for sellers whose group has both sides and can actually
+    // clear this phase. This preserves a reserve declared in an otherwise inactive group
+    // without letting that inactive seller consume sellable capacity needed elsewhere.
+    const sellerEndpointKey = (seller: MarketIntent): string =>
+      `${actorRefKey(seller.actor)}|${seller.inventoryBucket ?? "GENERAL"}|${seller.goodId}`;
+    const allSellers = stableOrderBy(
+      intents.filter((intent) => intent.side === "SELL"),
+      (intent) => `${actorRefKey(intent.actor)}|${intent.id}`,
+    );
+    const reserveByEndpoint = new Map<string, number>();
+    for (const seller of allSellers) {
+      const endpoint = sellerEndpointKey(seller);
+      reserveByEndpoint.set(
+        endpoint,
+        Math.max(reserveByEndpoint.get(endpoint) ?? 0, seller.minimumReserveQuantity ?? 0),
+      );
+    }
+
+    const activeSellerIds = new Set<string>();
     for (const group of intentsByMarketGoodPass.values()) {
+      if (group.buyers.length === 0 || group.sellers.length === 0) continue;
+      for (const seller of group.sellers) activeSellerIds.add(seller.id);
+    }
+
+    const sellerCommitments = new Map<string, number>();
+    const sellableByIntent = new Map<string, number>();
+    for (const seller of allSellers) {
+      if (!activeSellerIds.has(seller.id)) continue;
+      const inventoryBucket = seller.inventoryBucket ?? "GENERAL";
+      const inventory = readMarketActorInventory(world, seller.actor, inventoryBucket, "seller");
+      const ownedQuantity = inventory.get(seller.goodId as GoodId) ?? 0;
+      const endpoint = sellerEndpointKey(seller);
+      const alreadyCommitted = sellerCommitments.get(endpoint) ?? 0;
+      const sellable = computeSellableQuantity(
+        seller,
+        ownedQuantity,
+        reserveByEndpoint.get(endpoint) ?? 0,
+        alreadyCommitted,
+      );
+      sellerCommitments.set(endpoint, alreadyCommitted + sellable);
+      sellableByIntent.set(seller.id, sellable);
+    }
+
+    for (const [, group] of stableOrderBy(intentsByMarketGoodPass.entries(), ([key]) => key)) {
       if (group.buyers.length === 0 || group.sellers.length === 0) {
         continue;
       }
 
       // Use the price Phase 6 produced this tick when present (Handoff/04 section 9:
-      // "Phase 7 trade and Phase 8 clearing use the resulting Phase-6 price"), falling
-      // back to the world's current price so callers that only exercise Phase 8 in
-      // isolation (no Phase-6 handler run this tick) are unaffected.
+      // "Phase 7 trade and Phase 8 clearing use the resulting Phase-6 price"). Direct
+      // Phase-8 fixtures may use the live carried LocalMarket price, but there is no
+      // numeric fallback: missing canonical price evidence is a malformed fixture/state.
       const market = world.markets.get(group.marketId);
-      const marketPrice =
-        context.marketPrices.get(marketPriceKey(group.marketId, group.goodId as GoodId)) ??
-        market?.priceByGood.get(group.goodId as GoodId) ??
-        10;
+      if (market === undefined) {
+        throw new Error(`Phase-8 LocalMarket ${group.marketId} disappeared before clearing`);
+      }
+      const phase6Price = context.marketPrices.get(
+        marketPriceKey(group.marketId, group.goodId as GoodId),
+      );
+      const carriedPrice = market.priceByGood.get(group.goodId as GoodId);
+      const marketPrice = phase6Price ?? carriedPrice;
+      if (marketPrice === undefined || !Number.isFinite(marketPrice) || marketPrice <= 0) {
+        throw new Error(
+          `Phase-8 requires a finite positive canonical price for ${group.marketId}/${group.goodId}`,
+        );
+      }
 
       // Settlement facts belong to the region, not to this handler. An allocation is only
       // settleable onto authoritative stock if it names the currency the buyer and seller
@@ -196,19 +293,31 @@ export const createPhase8Handler = (options?: {
       // The rate therefore follows the destination, and one policy read feeds both the
       // effective demand a buyer can afford and the gross price the allocation records.
       const region = world.regions.get(group.regionId as RegionId);
-      const marketCurrencyId = region?.settlementCurrencyId ?? ("cur:reserve" as CurrencyId);
-      const destinationStateId = region?.controllerStateId ?? null;
+      if (region === undefined) {
+        throw new Error(`Phase-8 Region ${group.regionId} disappeared before clearing`);
+      }
+      if (market.seed.regionKey !== region.seed.key) {
+        throw new Error(
+          `Phase-8 LocalMarket ${group.marketId} does not belong to Region ${group.regionId}`,
+        );
+      }
+      const marketCurrencyId = region.settlementCurrencyId;
+      if (!world.currencies.has(marketCurrencyId)) {
+        throw new Error(
+          `Phase-8 Region ${group.regionId} settlement currency ${marketCurrencyId} is missing from WorldState`,
+        );
+      }
+      const destinationStateId = region.controllerStateId;
       const { assessedTaxRate, collectionEfficiency } = resolveTaxPolicy(
         taxPolicy,
         destinationStateId,
         group.goodId as GoodId,
       );
 
-      // Handoff/04 section 2: buyerGrossUnitPrice = sellerNet + collectedTaxPerUnit, and
-      // collectedTaxPerUnit = sellerNet x rate x collectionEfficiency. Destination-State
-      // PUBLIC_PROCUREMENT is explicitly self-procurement: keep the destination identity for
-      // audit/settlement, but exempt the buyer before affordability so a treasury cannot ration
-      // its own purchase on a tax that would merely return to that same treasury.
+      // Handoff/04 section 2: buyerGrossUnitPrice = sellerNet + collectedTaxPerUnit.
+      // Destination-State PUBLIC_PROCUREMENT is self-procurement: preserve the destination
+      // identity for audit/settlement but exempt that buyer before affordability. All other
+      // State purposes, other-State procurement and household consumption keep ordinary tax.
       const taxationForBuyer = (intent: MarketIntent) => {
         const isDestinationStateSelfProcurement =
           destinationStateId !== null &&
@@ -235,6 +344,13 @@ export const createPhase8Handler = (options?: {
       };
       const householdGrossPrice = marketPrice * (1 + assessedTaxRate * collectionEfficiency);
 
+      // Feed the globally precomputed physical-endpoint capacities to this local clearing
+      // group. Stable actor+intent order remains the per-group matching order as well.
+      const orderedSellers = stableOrderBy(
+        group.sellers,
+        (intent) => `${actorRefKey(intent.actor)}|${intent.id}`,
+      );
+
       // Create clearing input with production computations
       const clearingInput: LocalClearingInput = {
         marketId: group.marketId,
@@ -243,19 +359,23 @@ export const createPhase8Handler = (options?: {
         pass: "MAIN",
         marketCurrencyId,
         buyerIntents: group.buyers,
-        sellerIntents: group.sellers,
+        sellerIntents: orderedSellers,
         computeEffectiveDemand: (intent, grossPrice) => {
           if (intent.side !== "BUY") return 0;
           // Effective demand: min of desired quantity and maxSpend / grossPrice
-          const maxAffordable = intent.maxSpend === undefined
-            ? intent.desiredQuantity
-            : intent.maxSpend / grossPrice;
+          const maxAffordable =
+            intent.maxSpend === undefined
+              ? intent.desiredQuantity
+              : intent.maxSpend / grossPrice;
           return Math.min(intent.desiredQuantity, Math.max(0, maxAffordable));
         },
         computeSellableQuantity: (intent) => {
           if (intent.side !== "SELL") return 0;
-          // For M3 fixtures, assume all desired quantity is available
-          return intent.desiredQuantity;
+          const sellable = sellableByIntent.get(intent.id);
+          if (sellable === undefined) {
+            throw new Error(`Phase-8 SELL intent ${intent.id} has no sellable-stock evidence`);
+          }
+          return sellable;
         },
         computeGrossUnitPrice: (intent, sellerNetPrice) =>
           grossUnitPriceForBuyer(intent, sellerNetPrice),
@@ -278,12 +398,15 @@ export const createPhase8Handler = (options?: {
       // because the authoritative post-tick MarketExpectationState transition
       // (Handoff/04 section 9) must not depend on the non-authoritative telemetry
       // toggle (REQ-MARKET-005).
-      const totalSellerOffered = group.sellers.reduce((sum, i) => sum + i.desiredQuantity, 0);
+      const totalSellerOffered = orderedSellers.reduce(
+        (sum, seller) => sum + (sellableByIntent.get(seller.id) ?? 0),
+        0,
+      );
       let totalBuyerEffective = 0;
       for (const buyer of group.buyers) {
         const buyerGrossPrice = grossUnitPriceForBuyer(buyer, marketPrice);
         const buyerMaxSpend =
-          (buyer as any).maxSpend ?? (buyer.desiredQuantity * buyerGrossPrice);
+          buyer.maxSpend ?? (buyer.desiredQuantity * buyerGrossPrice);
         totalBuyerEffective += Math.min(
           buyer.desiredQuantity,
           buyerMaxSpend / buyerGrossPrice,

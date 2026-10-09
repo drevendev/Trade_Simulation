@@ -172,6 +172,22 @@ function readGoods(world: WorldState, endpoint: GoodsEndpoint): LiveInventory {
   }
 }
 
+/**
+ * Read the canonical live goods inventory named by a market actor + bucket.
+ *
+ * Phase handlers use this seam when they need pre-clearing stock authority. It deliberately
+ * reuses settlement's endpoint resolution so planning/clearing cannot grow a second convention
+ * for where Cohort, State, or ProductionUnit goods physically live.
+ */
+export function readMarketActorInventory(
+  world: WorldState,
+  actor: ActorRef,
+  bucket: MarketAllocation["sellerInventoryBucket"],
+  role: "seller" | "buyer" = "seller",
+): LiveInventory {
+  return readGoods(world, resolveGoodsEndpoint(actor, bucket, role));
+}
+
 function readWallet(world: WorldState, endpoint: WalletEndpoint): LiveWallet {
   switch (endpoint.kind) {
     case "COHORT":
